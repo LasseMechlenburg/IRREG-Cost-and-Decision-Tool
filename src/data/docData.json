@@ -1,0 +1,114 @@
+{
+  "extractedFrom": "References/COST CALCULATOR.xlsx",
+  "extractionNotes": {
+    "eu261DistanceColumnFound": false,
+    "eu261BandFromExcelAvailable": false,
+    "sheet2PotentialEu261Value": 393254.4
+  },
+  "aircraftTypes": [
+    "A339",
+    "A321",
+    "A321N",
+    "SUB_NARROWBODY"
+  ],
+  "eu261Defaults": {
+    "impactedPaxRatio": 0.35,
+    "standardBandsEur": [
+      250,
+      400,
+      600
+    ]
+  },
+  "routes": {
+    "ARN-LPA": {
+      "origin": "ARN",
+      "destination": "LPA",
+      "byAircraft": {
+        "A339": {
+          "month": "APRIL",
+          "seats": 373,
+          "blh": 5.851307189542486,
+          "pax": 180,
+          "doc": 439393.0009017739
+        },
+        "A321": {
+          "month": "APRIL",
+          "seats": 212,
+          "blh": 5.916666666666666,
+          "pax": 180,
+          "doc": 248674.50696695736
+        },
+        "A321N": {
+          "month": "APRIL",
+          "seats": 218,
+          "blh": 6.081081081081083,
+          "pax": 180,
+          "doc": 227625.64304663838
+        },
+        "SUB_NARROWBODY": {
+          "month": "APRIL",
+          "seats": 212,
+          "blh": 5.916666666666666,
+          "pax": 180,
+          "doc": 248674.50696695736
+        }
+      },
+      "eu261": {
+        "distanceKm": null,
+        "bandEur": null,
+        "bandSource": "manual_fallback",
+        "fallbackOptionsEur": [
+          250,
+          400,
+          600
+        ],
+        "routeLabel": "ARN-LPA"
+      }
+    },
+    "LPA-ARN": {
+      "origin": "LPA",
+      "destination": "ARN",
+      "byAircraft": {
+        "A339": {
+          "month": "APRIL",
+          "seats": 373,
+          "blh": 5.66666666666667,
+          "pax": 212,
+          "doc": 374292.0735485185
+        },
+        "A321": {
+          "month": "APRIL",
+          "seats": 212,
+          "blh": 5.75,
+          "pax": 212,
+          "doc": 216070.39029177596
+        },
+        "A321N": {
+          "month": "APRIL",
+          "seats": 212,
+          "blh": 5.75,
+          "pax": 212,
+          "doc": 216070.39029177596
+        },
+        "SUB_NARROWBODY": {
+          "month": "APRIL",
+          "seats": 212,
+          "blh": 5.75,
+          "pax": 212,
+          "doc": 216070.39029177596
+        }
+      },
+      "eu261": {
+        "distanceKm": null,
+        "bandEur": null,
+        "bandSource": "manual_fallback",
+        "fallbackOptionsEur": [
+          250,
+          400,
+          600
+        ],
+        "routeLabel": "LPA-ARN"
+      }
+    }
+  }
+}
