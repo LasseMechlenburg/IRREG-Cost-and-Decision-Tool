@@ -35,26 +35,37 @@ const COL = {
 
 const EU261_BANDS = [250, 400, 600]
 
-const sumDoc = (row) => {
-  const values = [
-    row[COL.fuelCost],
-    row[COL.uptakeCost],
-    row[COL.safCost],
-    row[COL.ets],
-    row[COL.cycleCost],
-    row[COL.fhCost],
-    row[COL.enroute],
-    row[COL.paxCharges],
-    row[COL.airportCharges],
-    row[COL.ghIn],
-    row[COL.ghOut],
-    row[COL.handling],
-  ]
+const toNumber = (value) => {
+  const num = Number(value)
+  return Number.isFinite(num) ? num : 0
+}
 
-  return values.reduce((acc, current) => {
-    const num = Number(current)
-    return acc + (Number.isFinite(num) ? num : 0)
-  }, 0)
+const getDocComponents = (row) => {
+  const components = {
+    fuel: toNumber(row[COL.fuelCost]),
+    uptake: toNumber(row[COL.uptakeCost]),
+    saf: toNumber(row[COL.safCost]),
+    ets: toNumber(row[COL.ets]),
+    cycle: toNumber(row[COL.cycleCost]),
+    fh: toNumber(row[COL.fhCost]),
+    enroute: toNumber(row[COL.enroute]),
+    turnaroundPax: toNumber(row[COL.paxCharges]),
+    turnaroundAircraft: toNumber(row[COL.airportCharges]),
+    ghIn: toNumber(row[COL.ghIn]),
+    ghOut: toNumber(row[COL.ghOut]),
+    handling: toNumber(row[COL.handling]),
+  }
+
+  const total = Object.values(components).reduce((acc, current) => acc + current, 0)
+  const acmiExcluded = components.fuel + components.handling + components.turnaroundAircraft + components.turnaroundPax
+  const acmiEligible = total - acmiExcluded
+
+  return {
+    components,
+    total,
+    acmiExcluded,
+    acmiEligible,
+  }
 }
 
 const bandFromDistanceKm = (distanceKm) => {
@@ -123,12 +134,17 @@ for (const aircraft of aircraftSheets) {
       }
     }
 
+    const docParts = getDocComponents(row)
+
     routes[routeKey].byAircraft[aircraft.code] = {
       month,
       seats: Number(row[COL.seats]) || 0,
       blh: Number(row[COL.blh]) || 0,
       pax,
-      doc: sumDoc(row),
+      doc: docParts.total,
+      docComponents: docParts.components,
+      acmiExcludedForMinimumPrice: docParts.acmiExcluded,
+      acmiEligibleDoc: docParts.acmiEligible,
     }
   }
 }

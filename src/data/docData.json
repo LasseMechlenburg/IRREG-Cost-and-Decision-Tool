@@ -29,28 +29,92 @@
           "seats": 373,
           "blh": 5.851307189542486,
           "pax": 180,
-          "doc": 439393.0009017739
+          "doc": 439393.0009017739,
+          "docComponents": {
+            "fuel": 121331.14076683937,
+            "uptake": 24059.999585492227,
+            "saf": 10311.428393782386,
+            "ets": 65617.18715025908,
+            "cycle": 11208.78,
+            "fh": 56002.42154800937,
+            "enroute": 55109.61248,
+            "turnaroundPax": 18937.447721179626,
+            "turnaroundAircraft": 49429.183999999994,
+            "ghIn": 7163.266704141208,
+            "ghOut": 11093.9328,
+            "handling": 9128.599752070604
+          },
+          "acmiExcludedForMinimumPrice": 198826.37224008958,
+          "acmiEligibleDoc": 240566.62866168434
         },
         "A321": {
           "month": "APRIL",
           "seats": 212,
           "blh": 5.916666666666666,
           "pax": 180,
-          "doc": 248674.50696695736
+          "doc": 248674.50696695736,
+          "docComponents": {
+            "fuel": 77200.55692307692,
+            "uptake": 15308.892307692306,
+            "saf": 6560.953846153846,
+            "ets": 41750.89230769231,
+            "cycle": 4201.72,
+            "fh": 14674.9474,
+            "enroute": 33459.37088,
+            "turnaroundPax": 18347.138490566034,
+            "turnaroundAircraft": 20543.028000000002,
+            "ghIn": 4911.434407850643,
+            "ghOut": 6173.236800000001,
+            "handling": 5542.335603925321
+          },
+          "acmiExcludedForMinimumPrice": 121633.05901756829,
+          "acmiEligibleDoc": 127041.44794938907
         },
         "A321N": {
           "month": "APRIL",
           "seats": 218,
           "blh": 6.081081081081083,
           "pax": 180,
-          "doc": 227625.64304663838
+          "doc": 227625.64304663838,
+          "docComponents": {
+            "fuel": 62836.471,
+            "uptake": 12460.49,
+            "saf": 5340.210000000001,
+            "ets": 33982.64000000001,
+            "cycle": 6692.56,
+            "fh": 17715.105000000007,
+            "enroute": 33440.63840000001,
+            "turnaroundPax": 18347.201834862386,
+            "turnaroundAircraft": 20183.32,
+            "ghIn": 4911.434407850643,
+            "ghOut": 6173.236800000001,
+            "handling": 5542.335603925321
+          },
+          "acmiExcludedForMinimumPrice": 106909.32843878769,
+          "acmiEligibleDoc": 120716.31460785068
         },
         "SUB_NARROWBODY": {
           "month": "APRIL",
           "seats": 212,
           "blh": 5.916666666666666,
           "pax": 180,
-          "doc": 248674.50696695736
+          "doc": 248674.50696695736,
+          "docComponents": {
+            "fuel": 77200.55692307692,
+            "uptake": 15308.892307692306,
+            "saf": 6560.953846153846,
+            "ets": 41750.89230769231,
+            "cycle": 4201.72,
+            "fh": 14674.9474,
+            "enroute": 33459.37088,
+            "turnaroundPax": 18347.138490566034,
+            "turnaroundAircraft": 20543.028000000002,
+            "ghIn": 4911.434407850643,
+            "ghOut": 6173.236800000001,
+            "handling": 5542.335603925321
+          },
+          "acmiExcludedForMinimumPrice": 121633.05901756829,
+          "acmiEligibleDoc": 127041.44794938907
         }
       },
       "eu261": {
@@ -74,28 +138,92 @@
           "seats": 373,
           "blh": 5.66666666666667,
           "pax": 212,
-          "doc": 374292.0735485185
+          "doc": 374292.0735485185,
+          "docComponents": {
+            "fuel": 116714.0337128205,
+            "uptake": 23144.425948717948,
+            "saf": 0,
+            "ets": 63120.20594871795,
+            "cycle": 11208.78,
+            "fh": 54235.24097416826,
+            "enroute": 55109.61248,
+            "turnaroundPax": 18858.815227882034,
+            "turnaroundAircraft": 4515.16,
+            "ghIn": 11093.9328,
+            "ghOut": 7163.266704141208,
+            "handling": 9128.599752070604
+          },
+          "acmiExcludedForMinimumPrice": 149216.60869277315,
+          "acmiEligibleDoc": 225075.46485574538
         },
         "A321": {
           "month": "APRIL",
           "seats": 212,
           "blh": 5.75,
           "pax": 212,
-          "doc": 216070.39029177596
+          "doc": 216070.39029177596,
+          "docComponents": {
+            "fuel": 72828.136,
+            "uptake": 14441.84,
+            "saf": 0,
+            "ets": 39386.24,
+            "cycle": 4201.72,
+            "fh": 14261.5686,
+            "enroute": 33459.37088,
+            "turnaroundPax": 18271.008,
+            "turnaroundAircraft": 2593.5,
+            "ghIn": 6173.236800000001,
+            "ghOut": 4911.434407850643,
+            "handling": 5542.335603925321
+          },
+          "acmiExcludedForMinimumPrice": 99234.97960392533,
+          "acmiEligibleDoc": 116835.41068785063
         },
         "A321N": {
           "month": "APRIL",
           "seats": 212,
           "blh": 5.75,
           "pax": 212,
-          "doc": 216070.39029177596
+          "doc": 216070.39029177596,
+          "docComponents": {
+            "fuel": 72828.136,
+            "uptake": 14441.84,
+            "saf": 0,
+            "ets": 39386.24,
+            "cycle": 4201.72,
+            "fh": 14261.5686,
+            "enroute": 33459.37088,
+            "turnaroundPax": 18271.008,
+            "turnaroundAircraft": 2593.5,
+            "ghIn": 6173.236800000001,
+            "ghOut": 4911.434407850643,
+            "handling": 5542.335603925321
+          },
+          "acmiExcludedForMinimumPrice": 99234.97960392533,
+          "acmiEligibleDoc": 116835.41068785063
         },
         "SUB_NARROWBODY": {
           "month": "APRIL",
           "seats": 212,
           "blh": 5.75,
           "pax": 212,
-          "doc": 216070.39029177596
+          "doc": 216070.39029177596,
+          "docComponents": {
+            "fuel": 72828.136,
+            "uptake": 14441.84,
+            "saf": 0,
+            "ets": 39386.24,
+            "cycle": 4201.72,
+            "fh": 14261.5686,
+            "enroute": 33459.37088,
+            "turnaroundPax": 18271.008,
+            "turnaroundAircraft": 2593.5,
+            "ghIn": 6173.236800000001,
+            "ghOut": 4911.434407850643,
+            "handling": 5542.335603925321
+          },
+          "acmiExcludedForMinimumPrice": 99234.97960392533,
+          "acmiEligibleDoc": 116835.41068785063
         }
       },
       "eu261": {

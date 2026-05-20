@@ -38,6 +38,10 @@ header p {
   gap: 10px;
 }
 
+.top-tool-row {
+  max-width: 190px;
+}
+
 .top-rate-label {
   display: flex;
   flex-direction: column;
@@ -73,6 +77,40 @@ header p {
   overflow: auto;
 }
 
+.tool-toggle-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 280px;
+}
+
+.tool-toggle-btn {
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 9px 10px;
+  font-weight: 600;
+  background: #f8fafc;
+}
+
+.tool-toggle-btn.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1e3a8a;
+}
+
+.tool-module-panel {
+  border: 1px solid #dbe3ee;
+  border-radius: 10px;
+  padding: 10px;
+  background: #ffffff;
+  margin-bottom: 12px;
+}
+
+.tool-module-panel h3 {
+  margin-top: 0;
+}
+
 .panel h2 {
   margin-top: 0;
   margin-bottom: 12px;
@@ -100,7 +138,7 @@ header p {
 
 .route-row {
   display: grid;
-  grid-template-columns: 70px repeat(4, minmax(90px, 1fr));
+  grid-template-columns: 70px repeat(5, minmax(90px, 1fr));
   gap: 8px;
   align-items: center;
 }
@@ -158,6 +196,51 @@ header p {
 
 .section-card h3 {
   margin-top: 0;
+}
+
+.toggle-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.enabled-options-layout {
+  display: block;
+}
+
+.own-availability-grid {
+  margin-top: 10px;
+}
+
+.own-availability-inline {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(170px, 220px));
+  gap: 8px;
+}
+
+.own-availability-under-owntoggle {
+  padding-left: 22px;
+}
+
+.acmi-summary {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.acmi-summary p {
+  margin: 4px 0;
+}
+
+.acmi-breakdown-details {
+  margin-top: 8px;
+}
+
+.acmi-breakdown-details ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
 }
 
 .settings-box h4 {
@@ -371,6 +454,18 @@ label span {
   }
 
   .route-row {
+    grid-template-columns: 1fr;
+  }
+
+  .enabled-options-layout {
+    display: block;
+  }
+
+  .tool-toggle-row {
+    max-width: none;
+  }
+
+  .own-availability-inline {
     grid-template-columns: 1fr;
   }
 }
