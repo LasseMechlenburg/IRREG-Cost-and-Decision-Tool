@@ -35,6 +35,21 @@ const COL = {
 
 const EU261_BANDS = [250, 400, 600]
 
+const initComponentAccumulator = () => ({
+  fuel: 0,
+  uptake: 0,
+  saf: 0,
+  ets: 0,
+  cycle: 0,
+  fh: 0,
+  enroute: 0,
+  turnaroundPax: 0,
+  turnaroundAircraft: 0,
+  ghIn: 0,
+  ghOut: 0,
+  handling: 0,
+})
+
 const toNumber = (value) => {
   const num = Number(value)
   return Number.isFinite(num) ? num : 0
@@ -94,6 +109,15 @@ const sheet2Rows = sheet2
 const inferredPotentialEu261 = Number(sheet2Rows[6]?.[2])
 
 const routes = {}
+const aircraftAggregates = aircraftSheets.reduce((acc, aircraft) => {
+  acc[aircraft.code] = {
+    count: 0,
+    blhTotal: 0,
+    docTotal: 0,
+    componentSums: initComponentAccumulator(),
+  }
+  return acc
+}, {})
 
 for (const aircraft of aircraftSheets) {
   const sheet = workbook.Sheets[aircraft.sheet]
@@ -135,6 +159,13 @@ for (const aircraft of aircraftSheets) {
     }
 
     const docParts = getDocComponents(row)
+    const aggregate = aircraftAggregates[aircraft.code]
+    aggregate.count += 1
+    aggregate.blhTotal += Number(row[COL.blh]) || 0
+    aggregate.docTotal += docParts.total
+    Object.keys(aggregate.componentSums).forEach((key) => {
+      aggregate.componentSums[key] += docParts.components[key]
+    })
 
     routes[routeKey].byAircraft[aircraft.code] = {
       month,
@@ -161,6 +192,29 @@ for (const route of Object.values(routes)) {
   route.eu261.routeLabel = distanceName
 }
 
+const aircraftComponentDefaults = Object.entries(aircraftAggregates).reduce((acc, [aircraftCode, aggregate]) => {
+  const count = aggregate.count || 1
+  const avgBlh = aggregate.blhTotal / count
+  const avgDoc = aggregate.docTotal / count
+  const componentAvg = Object.entries(aggregate.componentSums).reduce((componentAcc, [key, value]) => {
+    componentAcc[key] = value / count
+    return componentAcc
+  }, {})
+  const safeBlh = avgBlh > 0 ? avgBlh : 1
+  const componentPerBlh = Object.entries(componentAvg).reduce((componentAcc, [key, value]) => {
+    componentAcc[key] = value / safeBlh
+    return componentAcc
+  }, {})
+
+  acc[aircraftCode] = {
+    avgBlh,
+    avgDoc,
+    componentAvg,
+    componentPerBlh,
+  }
+  return acc
+}, {})
+
 const output = {
   extractedFrom: 'References/COST CALCULATOR.xlsx',
   extractionNotes: {
@@ -175,6 +229,7 @@ const output = {
     impactedPaxRatio: 0.35,
     standardBandsEur: EU261_BANDS,
   },
+  aircraftComponentDefaults,
   routes,
 }
 

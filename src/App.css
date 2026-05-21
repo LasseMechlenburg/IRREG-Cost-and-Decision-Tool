@@ -99,6 +99,11 @@ header p {
   color: #1e3a8a;
 }
 
+.tool-toggle-btn:focus {
+  outline: none;
+  box-shadow: none;
+}
+
 .tool-module-panel {
   border: 1px solid #dbe3ee;
   border-radius: 10px;
@@ -109,6 +114,49 @@ header p {
 
 .tool-module-panel h3 {
   margin-top: 0;
+}
+
+.audit-panel details > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.audit-body {
+  margin-top: 10px;
+  display: grid;
+  gap: 12px;
+}
+
+.audit-block {
+  border: 1px solid #dbe3ee;
+  border-radius: 10px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+.audit-block h3 {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.audit-mini-block {
+  margin-top: 8px;
+}
+
+.audit-kv-list {
+  columns: 2;
+  column-gap: 18px;
+}
+
+.audit-kv-list li {
+  break-inside: avoid;
+}
+
+.baseline-params-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  gap: 10px;
 }
 
 .panel h2 {
@@ -144,11 +192,20 @@ header p {
 }
 
 .route-row.with-controls {
-  grid-template-columns: 80px 90px 130px repeat(4, minmax(80px, 1fr));
+  grid-template-columns: 62px 70px 110px 86px repeat(4, 72px);
+  gap: 6px;
 }
 
 .route-row.with-controls.sub-row {
-  grid-template-columns: 80px 90px repeat(4, minmax(80px, 1fr));
+  grid-template-columns: 62px 70px 110px repeat(4, 72px);
+  gap: 6px;
+}
+
+.route-row.with-controls input,
+.route-row.with-controls select {
+  min-width: 0;
+  padding: 6px;
+  font-size: 13px;
 }
 
 .route-grid.four-lines {
@@ -466,6 +523,10 @@ label span {
   }
 
   .own-availability-inline {
+    grid-template-columns: 1fr;
+  }
+
+  .baseline-params-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -23,12 +23,14 @@ type RouteLegInput = {
 
 type OwnBaseLineInput = {
   enabled: boolean
+  applyToAllResults: boolean
   aircraft: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
   leg: RouteLegInput
 }
 
 type SubBaseLineInput = {
   enabled: boolean
+  applyToAllResults: boolean
   leg: RouteLegInput
 }
 
@@ -164,6 +166,7 @@ type CostBreakdown = {
 
 type EnabledSubCharterLine = {
   enabled: boolean
+  applyToAllResults: boolean
   leg: RouteLegInput
   charter: 1 | 2 | 3
   subType: 'SUB Narrowbody' | 'SUB Widebody'
@@ -187,6 +190,65 @@ type AdhocBreakdown = {
   details: string[]
 }
 
+type BaselineAircraftKey = 'A321' | 'A321N' | 'A339' | 'SUB Narrowbody' | 'SUB Widebody'
+type BaselineComponentKey = keyof NonNullable<AircraftRouteData['docComponents']>
+type BaselineAircraftParameters = {
+  blh: number
+  componentsPerBlh: Record<BaselineComponentKey, number>
+}
+
+const DOC_COMPONENT_KEYS: Array<keyof NonNullable<AircraftRouteData['docComponents']>> = [
+  'fuel',
+  'uptake',
+  'saf',
+  'ets',
+  'cycle',
+  'fh',
+  'enroute',
+  'turnaroundPax',
+  'turnaroundAircraft',
+  'ghIn',
+  'ghOut',
+  'handling',
+]
+
+const DOC_COMPONENT_LABELS: Record<keyof NonNullable<AircraftRouteData['docComponents']>, string> = {
+  fuel: 'Fuel',
+  uptake: 'Uptake',
+  saf: 'SAF',
+  ets: 'ETS',
+  cycle: 'Maintenance reserve (Cycle)',
+  fh: 'Maintenance reserve (FH)',
+  enroute: 'Enroute',
+  turnaroundPax: 'Turnaround pax',
+  turnaroundAircraft: 'Turnaround aircraft',
+  ghIn: 'Ground handling in',
+  ghOut: 'Ground handling out',
+  handling: 'Handling',
+}
+
+const BASELINE_AIRCRAFT_OPTIONS: BaselineAircraftKey[] = ['A321', 'A321N', 'A339', 'SUB Narrowbody', 'SUB Widebody']
+
+function sumComponentsPerBlh(components: Record<BaselineComponentKey, number>): number {
+  return DOC_COMPONENT_KEYS.reduce((sum, key) => sum + (components[key] ?? 0), 0)
+}
+
+function nonMaintComponentsPerBlh(components: Record<BaselineComponentKey, number>): number {
+  const total = sumComponentsPerBlh(components)
+  return Math.max(0, total - (components.cycle ?? 0) - (components.fh ?? 0))
+}
+
+function roundToTwo(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
+type AuditComponentSummary = {
+  blhTotal: number
+  docTotal: number
+  componentTotals: Record<keyof NonNullable<AircraftRouteData['docComponents']>, number>
+  fallbackLegCount: number
+}
+
 type RawRoute = {
   origin: string
   destination: string
@@ -204,6 +266,15 @@ type DataShape = {
     impactedPaxRatio?: number
     standardBandsEur?: number[]
   }
+  aircraftComponentDefaults?: Record<
+    string,
+    {
+      avgBlh?: number
+      avgDoc?: number
+      componentAvg?: Partial<Record<keyof NonNullable<AircraftRouteData['docComponents']>, number>>
+      componentPerBlh?: Partial<Record<keyof NonNullable<AircraftRouteData['docComponents']>, number>>
+    }
+  >
   routes: Record<string, RawRoute>
 }
 
@@ -234,6 +305,13 @@ const SCENARIOS: Record<OriginalType, ScenarioOption[]> = {
     { id: 'a339', name: 'A339', legs: ['A339'] },
     { id: 'sub', name: 'SUB Narrowbody', legs: ['SUB Narrowbody'] },
     { id: 'sub-wide', name: 'Subcharter Option 3 (Widebody)', legs: ['SUB Widebody'] },
+    { id: '2xa321', name: '2 x A321', legs: ['A321', 'A321'] },
+    { id: '2xa321n', name: '2 x A321N', legs: ['A321N', 'A321N'] },
+    { id: 'a321-a321n', name: 'A321 + A321N', legs: ['A321', 'A321N'] },
+    { id: 'a321-sub', name: 'A321 + SUB Narrowbody', legs: ['A321', 'SUB Narrowbody'] },
+    { id: 'a321n-sub', name: 'A321N + SUB Narrowbody', legs: ['A321N', 'SUB Narrowbody'] },
+    { id: 'a321-sub-wide', name: 'A321 + Subcharter Option 3 (Widebody)', legs: ['A321', 'SUB Widebody'] },
+    { id: 'a321n-sub-wide', name: 'A321N + Subcharter Option 3 (Widebody)', legs: ['A321N', 'SUB Widebody'] },
   ],
   A339: [
     { id: 'a321', name: 'A321', legs: ['A321'] },
@@ -260,49 +338,23 @@ const SCENARIOS: Record<OriginalType, ScenarioOption[]> = {
     { id: 'a339', name: 'A339', legs: ['A339'] },
     { id: 'sub', name: 'SUB Narrowbody', legs: ['SUB Narrowbody'] },
     { id: 'sub-wide', name: 'Subcharter Option 3 (Widebody)', legs: ['SUB Widebody'] },
+    { id: '2xa321', name: '2 x A321', legs: ['A321', 'A321'] },
+    { id: '2xa321n', name: '2 x A321N', legs: ['A321N', 'A321N'] },
+    { id: 'a321-a321n', name: 'A321 + A321N', legs: ['A321', 'A321N'] },
+    { id: 'a321-sub', name: 'A321 + SUB Narrowbody', legs: ['A321', 'SUB Narrowbody'] },
+    { id: 'a321n-sub', name: 'A321N + SUB Narrowbody', legs: ['A321N', 'SUB Narrowbody'] },
+    { id: 'a321-sub-wide', name: 'A321 + Subcharter Option 3 (Widebody)', legs: ['A321', 'SUB Widebody'] },
+    { id: 'a321n-sub-wide', name: 'A321N + Subcharter Option 3 (Widebody)', legs: ['A321N', 'SUB Widebody'] },
   ],
 }
 
-const DEFAULTS_BY_AIRCRAFT = OWN_AIRCRAFT.reduce<
-  Record<Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>, { blh: number; docPerBlh: number; seats: number }>
->(
-  (acc, aircraft) => {
-    const rows = ROUTES.map((route) => route.byAircraft[aircraft]).filter((item): item is AircraftRouteData => Boolean(item))
-
-    const blhAvg = rows.length ? rows.reduce((sum, item) => sum + item.blh, 0) / rows.length : 0
-    const docPerBlhAvg = rows.length
-      ? rows.reduce((sum, item) => sum + (item.blh > 0 ? item.doc / item.blh : 0), 0) / rows.length
-      : 0
-    const seatsAvg = rows.length ? rows.reduce((sum, item) => sum + item.seats, 0) / rows.length : 0
-
-    acc[aircraft] = {
-      blh: blhAvg,
-      docPerBlh: docPerBlhAvg,
-      seats: aircraft === 'A321N' ? 218 : Math.round(seatsAvg),
-    }
-
-    return acc
-  },
-  {
-    A321: { blh: 0, docPerBlh: 0, seats: 0 },
-    A321N: { blh: 0, docPerBlh: 0, seats: 0 },
-    A339: { blh: 0, docPerBlh: 0, seats: 0 },
-  },
-)
-
-const ACMI_DEFAULT_DOC_PER_BLH_BY_AIRCRAFT = OWN_AIRCRAFT.reduce<
+const DEFAULT_SEATS_BY_AIRCRAFT = OWN_AIRCRAFT.reduce<
   Record<Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>, number>
 >(
   (acc, aircraft) => {
     const rows = ROUTES.map((route) => route.byAircraft[aircraft]).filter((item): item is AircraftRouteData => Boolean(item))
-    const acmiDocPerBlhAvg = rows.length
-      ? rows.reduce((sum, item) => {
-          if (item.blh <= 0) return sum
-          const eligibleDoc = typeof item.acmiEligibleDoc === 'number' ? item.acmiEligibleDoc : item.doc
-          return sum + eligibleDoc / item.blh
-        }, 0) / rows.length
-      : 0
-    acc[aircraft] = acmiDocPerBlhAvg
+    const seatsAvg = rows.length ? rows.reduce((sum, item) => sum + item.seats, 0) / rows.length : 0
+    acc[aircraft] = aircraft === 'A321N' ? 218 : Math.round(seatsAvg)
     return acc
   },
   {
@@ -312,37 +364,16 @@ const ACMI_DEFAULT_DOC_PER_BLH_BY_AIRCRAFT = OWN_AIRCRAFT.reduce<
   },
 )
 
-const SUB_NON_MAINT_DEFAULT_DOC_PER_BLH: Record<'SUB Narrowbody' | 'SUB Widebody', number> = {
-  'SUB Narrowbody': (() => {
-    const rows = ROUTES.map((route) => route.byAircraft['SUB Narrowbody']).filter((item): item is AircraftRouteData => Boolean(item))
-    if (!rows.length) return DEFAULTS_BY_AIRCRAFT.A321.docPerBlh
-    const total = rows.reduce((sum, row) => {
-      if (row.blh <= 0) return sum
-      return sum + getDocWithoutMaintenanceReserves(row) / row.blh
-    }, 0)
-    return total / rows.length
-  })(),
-  'SUB Widebody': (() => {
-    const rows = ROUTES.map((route) => route.byAircraft.A339).filter((item): item is AircraftRouteData => Boolean(item))
-    if (!rows.length) return DEFAULTS_BY_AIRCRAFT.A339.docPerBlh
-    const total = rows.reduce((sum, row) => {
-      if (row.blh <= 0) return sum
-      return sum + getDocWithoutMaintenanceReserves(row) / row.blh
-    }, 0)
-    return total / rows.length
-  })(),
-}
-
 function emptyLeg(): RouteLegInput {
   return { from: '', depUtc: '', arrUtc: '', to: '', pax: '' }
 }
 
 function emptyOwnBaseLine(): OwnBaseLineInput {
-  return { enabled: false, aircraft: '', leg: emptyLeg() }
+  return { enabled: false, applyToAllResults: false, aircraft: '', leg: emptyLeg() }
 }
 
 function emptySubBaseLine(): SubBaseLineInput {
-  return { enabled: false, leg: emptyLeg() }
+  return { enabled: false, applyToAllResults: false, leg: emptyLeg() }
 }
 
 function normalizeStation(input: string): string {
@@ -373,17 +404,6 @@ function hasStations(leg: RouteLegInput): boolean {
 
 function getRoute(from: string, to: string): RouteInfo | undefined {
   return ROUTES.find((route) => route.from === from && route.to === to)
-}
-
-function getLegData(from: string, to: string, aircraft: AircraftType): AircraftRouteData | undefined {
-  if (aircraft === 'SUB Widebody') {
-    // SUB Widebody uses A339 BLH profile as agreed.
-    return getRoute(from, to)?.byAircraft.A339
-  }
-  if (aircraft === 'SUB Narrowbody') {
-    return getRoute(from, to)?.byAircraft['SUB Narrowbody']
-  }
-  return getRoute(from, to)?.byAircraft[aircraft]
 }
 
 function parseUtcTimeToMinutes(value: string): number | null {
@@ -422,14 +442,6 @@ function toEur(value: number): string {
     currency: 'EUR',
     maximumFractionDigits: 0,
   }).format(value)
-}
-
-function getDocWithoutMaintenanceReserves(routeData: AircraftRouteData): number {
-  const components = routeData.docComponents
-  if (!components) {
-    return routeData.doc
-  }
-  return Math.max(0, routeData.doc - components.cycle - components.fh)
 }
 
 function toSignedDkkDelta(value: number): string {
@@ -550,7 +562,97 @@ const INITIAL_FORM: FormState = {
 function App() {
   const [form, setForm] = useState<FormState>(INITIAL_FORM)
   const [eu261ByScenario, setEu261ByScenario] = useState<Record<string, ScenarioEu261Selection>>({})
+  const [showBaselinePanel, setShowBaselinePanel] = useState(false)
+  const [selectedBaselineAircraft, setSelectedBaselineAircraft] = useState<BaselineAircraftKey>('A321')
   const isToolMode = form.enableAcmiModule || form.enableAdhocModule
+  const [baselineByAircraft, setBaselineByAircraft] = useState<Record<BaselineAircraftKey, BaselineAircraftParameters>>(() => {
+    const fromDefault = (aircraftCode: 'A321' | 'A321N' | 'A339' | 'SUB_NARROWBODY'): BaselineAircraftParameters => {
+      const componentPerBlhRaw = data.aircraftComponentDefaults?.[aircraftCode]?.componentPerBlh ?? {}
+      const componentsPerBlh = DOC_COMPONENT_KEYS.reduce(
+        (acc, key) => {
+          acc[key] = roundToTwo(Number(componentPerBlhRaw[key] ?? 0))
+          return acc
+        },
+        {} as Record<BaselineComponentKey, number>,
+      )
+      const blh = roundToTwo(Number(data.aircraftComponentDefaults?.[aircraftCode]?.avgBlh ?? 0) || 0)
+      return { blh, componentsPerBlh }
+    }
+
+    const a321 = fromDefault('A321')
+    const a321n = fromDefault('A321N')
+    const a339 = fromDefault('A339')
+    const subNarrow = fromDefault('SUB_NARROWBODY')
+    const subWide = { ...a339, componentsPerBlh: { ...a339.componentsPerBlh } }
+
+    return {
+      A321: a321,
+      A321N: a321n,
+      A339: a339,
+      'SUB Narrowbody': subNarrow,
+      'SUB Widebody': subWide,
+    }
+  })
+  const ownDocPerBlhByAircraft = useMemo(
+    () => ({
+      A321: sumComponentsPerBlh(baselineByAircraft.A321.componentsPerBlh),
+      A321N: sumComponentsPerBlh(baselineByAircraft.A321N.componentsPerBlh),
+      A339: sumComponentsPerBlh(baselineByAircraft.A339.componentsPerBlh),
+    }),
+    [baselineByAircraft],
+  )
+  const acmiDocPerBlhByAircraft = useMemo(
+    () => ({
+      A321: Math.max(
+        0,
+        sumComponentsPerBlh(baselineByAircraft.A321.componentsPerBlh) -
+          (baselineByAircraft.A321.componentsPerBlh.fuel ?? 0) -
+          (baselineByAircraft.A321.componentsPerBlh.handling ?? 0) -
+          (baselineByAircraft.A321.componentsPerBlh.turnaroundAircraft ?? 0) -
+          (baselineByAircraft.A321.componentsPerBlh.turnaroundPax ?? 0),
+      ),
+      A321N: Math.max(
+        0,
+        sumComponentsPerBlh(baselineByAircraft.A321N.componentsPerBlh) -
+          (baselineByAircraft.A321N.componentsPerBlh.fuel ?? 0) -
+          (baselineByAircraft.A321N.componentsPerBlh.handling ?? 0) -
+          (baselineByAircraft.A321N.componentsPerBlh.turnaroundAircraft ?? 0) -
+          (baselineByAircraft.A321N.componentsPerBlh.turnaroundPax ?? 0),
+      ),
+      A339: Math.max(
+        0,
+        sumComponentsPerBlh(baselineByAircraft.A339.componentsPerBlh) -
+          (baselineByAircraft.A339.componentsPerBlh.fuel ?? 0) -
+          (baselineByAircraft.A339.componentsPerBlh.handling ?? 0) -
+          (baselineByAircraft.A339.componentsPerBlh.turnaroundAircraft ?? 0) -
+          (baselineByAircraft.A339.componentsPerBlh.turnaroundPax ?? 0),
+      ),
+    }),
+    [baselineByAircraft],
+  )
+  const subNonMaintDocPerBlh = useMemo(
+    () => ({
+      'SUB Narrowbody': nonMaintComponentsPerBlh(baselineByAircraft['SUB Narrowbody'].componentsPerBlh),
+      'SUB Widebody': nonMaintComponentsPerBlh(baselineByAircraft['SUB Widebody'].componentsPerBlh),
+    }),
+    [baselineByAircraft],
+  )
+  const ownBlhDefaults = useMemo(
+    () => ({
+      A321: baselineByAircraft.A321.blh,
+      A321N: baselineByAircraft.A321N.blh,
+      A339: baselineByAircraft.A339.blh,
+    }),
+    [baselineByAircraft],
+  )
+  const ownSeatDefaults = useMemo(
+    () => ({
+      A321: DEFAULT_SEATS_BY_AIRCRAFT.A321,
+      A321N: DEFAULT_SEATS_BY_AIRCRAFT.A321N,
+      A339: DEFAULT_SEATS_BY_AIRCRAFT.A339,
+    }),
+    [],
+  )
   const scenarioOptions = form.originalType ? SCENARIOS[form.originalType] : []
   const selectedOriginalType: OriginalType = form.originalType || 'A321'
 
@@ -638,11 +740,24 @@ function App() {
     const enabledNarrowOptions: (1 | 2)[] = []
     if (form.enableSubOption1) enabledNarrowOptions.push(1)
     if (form.enableSubOption2) enabledNarrowOptions.push(2)
+    const maxLegPax = activeLegs.reduce((max, leg) => Math.max(max, typeof leg.pax === 'number' ? leg.pax : 0), 0)
+    const enabledSingleCapacities: number[] = []
+    if (form.enableOwnScaFlights) {
+      if (form.ownAvailableA321 > 0) enabledSingleCapacities.push(ownSeatDefaults.A321)
+      if (form.ownAvailableA321N > 0) enabledSingleCapacities.push(ownSeatDefaults.A321N)
+      if (form.ownAvailableA339 > 0) enabledSingleCapacities.push(ownSeatDefaults.A339)
+    }
+    if (form.enableSubOption1) enabledSingleCapacities.push(form.subCharter1Seats)
+    if (form.enableSubOption2) enabledSingleCapacities.push(form.subCharter2Seats)
+    if (form.enableSubOption3) enabledSingleCapacities.push(form.subCharter3Seats)
+    const shouldHideComboScenarios =
+      maxLegPax > 0 && enabledSingleCapacities.some((capacity) => capacity >= maxLegPax)
 
     return scenarioOptions.flatMap((option) => {
       const hasNarrow = option.legs.includes('SUB Narrowbody')
       const hasWide = option.legs.includes('SUB Widebody')
       const hasOwn = option.legs.some((leg) => leg !== 'SUB Narrowbody' && leg !== 'SUB Widebody')
+      const isCombinationOption = option.legs.length > 1
       const ownLegDemand = option.legs.reduce(
         (acc, leg) => {
           if (leg === 'A321') acc.A321 += 1
@@ -655,6 +770,7 @@ function App() {
 
       if (hasWide && !form.enableSubOption3) return []
       if (hasOwn && !form.enableOwnScaFlights) return []
+      if (isCombinationOption && shouldHideComboScenarios) return []
       if (ownLegDemand.A321 > form.ownAvailableA321) return []
       if (ownLegDemand.A321N > form.ownAvailableA321N) return []
       if (ownLegDemand.A339 > form.ownAvailableA339) return []
@@ -679,14 +795,23 @@ function App() {
     form.ownAvailableA321,
     form.ownAvailableA321N,
     form.ownAvailableA339,
+    ownSeatDefaults,
+    form.subCharter1Seats,
+    form.subCharter2Seats,
+    form.subCharter3Seats,
     form.enableSubOption1,
     form.enableSubOption2,
     form.enableSubOption3,
+    activeLegs,
     scenarioOptions,
   ])
 
   const firstOrigin = activeLegs[0]?.from ?? ''
   const finalDestination = activeLegs[activeLegs.length - 1]?.to ?? ''
+  const scenarioOptionById = useMemo(
+    () => new Map(availableScenarioOptions.map((option) => [option.id, option])),
+    [availableScenarioOptions],
+  )
 
   const primaryRouteInfo = firstOrigin && finalDestination ? getRoute(firstOrigin, finalDestination) : undefined
   const eu261Bands = primaryRouteInfo?.eu261.fallbackOptionsEur?.length
@@ -699,21 +824,16 @@ function App() {
     }
 
     return activeLegs.map((leg, idx) => {
-      const excelBlh = getLegData(leg.from, leg.to, selectedOriginalType)?.blh
       const timeBlh = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc)
-
-      if (excelBlh && excelBlh > 0) {
-        return { label: `Leg ${idx + 1}`, from: leg.from, to: leg.to, blh: excelBlh, source: 'excel' }
-      }
 
       if (timeBlh && timeBlh > 0) {
         return { label: `Leg ${idx + 1}`, from: leg.from, to: leg.to, blh: timeBlh, source: 'time' }
       }
 
-      const fallback = DEFAULTS_BY_AIRCRAFT[selectedOriginalType].blh
+      const fallback = ownBlhDefaults[selectedOriginalType]
       return { label: `Leg ${idx + 1}`, from: leg.from, to: leg.to, blh: fallback, source: 'fallback' }
     })
-  }, [activeLegs, form.originalType, selectedOriginalType])
+  }, [activeLegs, form.originalType, ownBlhDefaults, selectedOriginalType])
 
   const results = useMemo<CostBreakdown[]>(() => {
     if (!form.originalType) {
@@ -725,17 +845,11 @@ function App() {
     const ownScaExtraHotacDkk = typeof form.ownScaExtraHotacDkk === 'number' ? form.ownScaExtraHotacDkk : 0
     const ownScaExtraCrewPerDiemEur =
       typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0
-    const originalSampleRoute =
-      firstOrigin && finalDestination ? getLegData(firstOrigin, finalDestination, selectedOriginalType) : undefined
-    const originalDocPerBlh = originalSampleRoute
-      ? (originalSampleRoute.blh > 0 ? originalSampleRoute.doc / originalSampleRoute.blh : 0)
-      : DEFAULTS_BY_AIRCRAFT[selectedOriginalType].docPerBlh
+    const originalDocPerBlh = ownDocPerBlhByAircraft[selectedOriginalType]
     const originalMainBlhTotal = activeLegs.reduce((sum, leg) => {
-      const excelBlh = getLegData(leg.from, leg.to, selectedOriginalType)?.blh
       const timeBlh = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc)
-      if (excelBlh && excelBlh > 0) return sum + excelBlh
       if (timeBlh && timeBlh > 0) return sum + timeBlh
-      return sum + DEFAULTS_BY_AIRCRAFT[selectedOriginalType].blh
+      return sum + ownBlhDefaults[selectedOriginalType]
     }, 0)
 
     return availableScenarioOptions
@@ -772,6 +886,11 @@ function App() {
           A321N: enabledOwnLines.filter((candidate) => candidate.aircraft === 'A321N'),
           A339: enabledOwnLines.filter((candidate) => candidate.aircraft === 'A339'),
         }
+        const ownGlobalLinesByAircraft = {
+          A321: enabledOwnLines.filter((candidate) => candidate.aircraft === 'A321' && candidate.applyToAllResults),
+          A321N: enabledOwnLines.filter((candidate) => candidate.aircraft === 'A321N' && candidate.applyToAllResults),
+          A339: enabledOwnLines.filter((candidate) => candidate.aircraft === 'A339' && candidate.applyToAllResults),
+        }
         const subWideCounter = { count: 0 }
         const subNarrowCounters: Record<1 | 2, number> = { 1: 0, 2: 0 }
         let subNarrowLegCounter = 0
@@ -780,6 +899,17 @@ function App() {
           2: enabledSubLines.filter((candidate) => candidate.subType === 'SUB Narrowbody' && candidate.charter === 2),
         }
         const subWideLines = enabledSubLines.filter((candidate) => candidate.subType === 'SUB Widebody')
+        const subGlobalLinesByOption: Record<1 | 2 | 3, EnabledSubCharterLine[]> = {
+          1: enabledSubLines.filter(
+            (candidate) => candidate.subType === 'SUB Narrowbody' && candidate.charter === 1 && candidate.applyToAllResults,
+          ),
+          2: enabledSubLines.filter(
+            (candidate) => candidate.subType === 'SUB Narrowbody' && candidate.charter === 2 && candidate.applyToAllResults,
+          ),
+          3: enabledSubLines.filter(
+            (candidate) => candidate.subType === 'SUB Widebody' && candidate.charter === 3 && candidate.applyToAllResults,
+          ),
+        }
         const subScenarioLegCountByType: Record<'SUB Narrowbody' | 'SUB Widebody', number> = {
           'SUB Narrowbody': option.legs.filter((leg) => leg === 'SUB Narrowbody').length,
           'SUB Widebody': option.legs.filter((leg) => leg === 'SUB Widebody').length,
@@ -847,13 +977,12 @@ function App() {
             hasOwnAircraftLeg = true
           }
 
-          const fallbackDefaults = !isSub ? DEFAULTS_BY_AIRCRAFT[aircraft] : undefined
+          const fallbackDefaults = !isSub ? { blh: ownBlhDefaults[aircraft], docPerBlh: ownDocPerBlhByAircraft[aircraft], seats: ownSeatDefaults[aircraft] } : undefined
           const forcedOptionByLeg =
             aircraft === 'SUB Narrowbody' && currentSubTypeLegIndex >= 0
               ? option.forcedSubNarrowbodyOptions?.[currentSubTypeLegIndex]
               : undefined
-          const subFallbackBlh =
-            aircraft === 'SUB Widebody' ? DEFAULTS_BY_AIRCRAFT.A339.blh : DEFAULTS_BY_AIRCRAFT.A321.blh
+          const subFallbackBlh = aircraft === 'SUB Widebody' ? baselineByAircraft['SUB Widebody'].blh : baselineByAircraft['SUB Narrowbody'].blh
           const fallbackBlh = isSub ? subFallbackBlh : (fallbackDefaults?.blh ?? 0)
           const effectiveNarrowOption: 1 | 2 =
             subLine?.charter === 2 ? 2 : forcedOptionByLeg ?? (option.forcedSubNarrowbodyOption === 2 ? 2 : 1)
@@ -883,11 +1012,7 @@ function App() {
           eu261LegOptions.push({ index, label: eu261LegLabel, checked: includeEu261ForLeg })
 
           const legBlhTotal = activeLegs.reduce((sum, leg) => {
-            const excelBlh = getLegData(leg.from, leg.to, aircraft)?.blh
             const timeBlh = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc)
-            if (excelBlh && excelBlh > 0) {
-              return sum + excelBlh
-            }
             if (timeBlh && timeBlh > 0) {
               return sum + timeBlh
             }
@@ -896,24 +1021,24 @@ function App() {
 
           let positioningBlhOneWay = line ? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? 0 : 0
           if (currentSubType && currentSubTypeLegIndex === 0) {
-            const extraLines =
-              currentSubType === 'SUB Narrowbody'
-                ? subNarrowLinesByOption[
-                    option.forcedSubNarrowbodyOptions?.[0] ?? option.forcedSubNarrowbodyOption ?? 1
-                  ].slice(subScenarioLegCountByType[currentSubType])
-                : subWideLines.slice(subScenarioLegCountByType[currentSubType])
-            const extraPositioningBlh = extraLines.reduce(
-              (sum, extraLine) => sum + (durationHoursFromUtcTimes(extraLine.leg.depUtc, extraLine.leg.arrUtc) ?? 0),
-              0,
-            )
+            const extraPositioningBlh = (() => {
+              const extraLines =
+                currentSubType === 'SUB Narrowbody'
+                  ? subNarrowLinesByOption[
+                      option.forcedSubNarrowbodyOptions?.[0] ?? option.forcedSubNarrowbodyOption ?? 1
+                    ].slice(subScenarioLegCountByType[currentSubType])
+                  : subWideLines.slice(subScenarioLegCountByType[currentSubType])
+              return extraLines.reduce(
+                (sum, extraLine) => sum + (durationHoursFromUtcTimes(extraLine.leg.depUtc, extraLine.leg.arrUtc) ?? 0),
+                0,
+              )
+            })()
             positioningBlhOneWay += extraPositioningBlh
           } else if (!isSub && currentOwnTypeLegIndex === 0) {
             const ownAircraft = aircraft as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
-            const extraOwnLines = ownLinesByAircraft[ownAircraft].slice(ownScenarioLegCountByAircraft[ownAircraft])
-            const extraOwnPositioningBlh = extraOwnLines.reduce(
-              (sum, extraLine) => sum + (durationHoursFromUtcTimes(extraLine.leg.depUtc, extraLine.leg.arrUtc) ?? 0),
-              0,
-            )
+            const extraOwnPositioningBlh = ownLinesByAircraft[ownAircraft]
+              .slice(ownScenarioLegCountByAircraft[ownAircraft])
+              .reduce((sum, extraLine) => sum + (durationHoursFromUtcTimes(extraLine.leg.depUtc, extraLine.leg.arrUtc) ?? 0), 0)
             positioningBlhOneWay += extraOwnPositioningBlh
           }
           const totalBlh = legBlhTotal + positioningBlhOneWay * 2
@@ -932,18 +1057,12 @@ function App() {
             const subRate = form.eurToDkkRate
             const charterCostDkk = totalBlh * subBlhCostEur * subRate
             const subNonMaintDocCostDkk = activeLegs.reduce((sum, leg) => {
-              const routeData = getLegData(leg.from, leg.to, aircraft)
-              const excelBlh = routeData?.blh
               const timeBlh = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc)
-              const legHours =
-                excelBlh && excelBlh > 0 ? excelBlh : timeBlh && timeBlh > 0 ? timeBlh : fallbackBlh
-              const nonMaintPerBlh =
-                routeData && routeData.blh > 0
-                  ? getDocWithoutMaintenanceReserves(routeData) / routeData.blh
-                  : SUB_NON_MAINT_DEFAULT_DOC_PER_BLH[aircraft]
+              const legHours = timeBlh && timeBlh > 0 ? timeBlh : fallbackBlh
+              const nonMaintPerBlh = subNonMaintDocPerBlh[aircraft]
               return sum + legHours * nonMaintPerBlh
             }, 0)
-            const positioningNonMaintDocCostDkk = positioningBlhOneWay * 2 * SUB_NON_MAINT_DEFAULT_DOC_PER_BLH[aircraft]
+            const positioningNonMaintDocCostDkk = positioningBlhOneWay * 2 * subNonMaintDocPerBlh[aircraft]
             cost = charterCostDkk + subNonMaintDocCostDkk + positioningNonMaintDocCostDkk
             if (aircraft === 'SUB Widebody') {
               usedSubAddOnCounts.opt3 += 1
@@ -953,11 +1072,7 @@ function App() {
               usedSubAddOnCounts.opt1 += 1
             }
           } else {
-            const sampleRoute =
-              firstOrigin && finalDestination ? getLegData(firstOrigin, finalDestination, aircraft) : undefined
-            const docPerBlh = sampleRoute
-              ? (sampleRoute.blh > 0 ? sampleRoute.doc / sampleRoute.blh : 0)
-              : (fallbackDefaults?.docPerBlh ?? 0)
+            const docPerBlh = fallbackDefaults?.docPerBlh ?? 0
             const mainCost = legBlhTotal * docPerBlh
             const positioningCost = positioningBlhOneWay * 2 * docPerBlh
             cost = mainCost + positioningCost
@@ -978,6 +1093,83 @@ function App() {
             `${aircraft} ${index + 1}: main BLH ${legBlhTotal.toFixed(2)} + positioning ${positioningBlhOneWay.toFixed(2)}*2 = ${totalBlh.toFixed(2)} -> ${toCurrency(cost)}`,
           )
         })
+
+        const ownScenarioHasType = {
+          A321: option.legs.includes('A321'),
+          A321N: option.legs.includes('A321N'),
+          A339: option.legs.includes('A339'),
+        }
+        const ownGlobalAppliedByAircraft: Record<'A321' | 'A321N' | 'A339', { blh: number; cost: number }> = {
+          A321: { blh: 0, cost: 0 },
+          A321N: { blh: 0, cost: 0 },
+          A339: { blh: 0, cost: 0 },
+        }
+        ;(['A321', 'A321N', 'A339'] as const).forEach((aircraft) => {
+          if (ownScenarioHasType[aircraft]) return
+          ownGlobalLinesByAircraft[aircraft].forEach((line) => {
+            const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? 0
+            if (blh <= 0) return
+            const lineCost = blh * 2 * ownDocPerBlhByAircraft[aircraft]
+            operatingCost += lineCost
+            ownGlobalAppliedByAircraft[aircraft].blh += blh
+            ownGlobalAppliedByAircraft[aircraft].cost += lineCost
+          })
+        })
+
+        const narrowOptionsUsed = Array.from(subNarrowbodyOptionsUsed)
+        const subScenarioUsesOption: Record<1 | 2 | 3, boolean> = {
+          1: narrowOptionsUsed.includes(1),
+          2: narrowOptionsUsed.includes(2),
+          3: option.legs.includes('SUB Widebody'),
+        }
+        const subGlobalAppliedByOption: Record<1 | 2 | 3, { blh: number; cost: number }> = {
+          1: { blh: 0, cost: 0 },
+          2: { blh: 0, cost: 0 },
+          3: { blh: 0, cost: 0 },
+        }
+        ;([1, 2, 3] as const).forEach((opt) => {
+          if (subScenarioUsesOption[opt]) return
+          subGlobalLinesByOption[opt].forEach((line) => {
+            const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? 0
+            if (blh <= 0) return
+            const subType = opt === 3 ? 'SUB Widebody' : 'SUB Narrowbody'
+            const subBlhCostEur = opt === 3 ? sub3BlhCostEur : opt === 2 ? sub2BlhCostEur : sub1BlhCostEur
+            const lineCost = blh * 2 * (subBlhCostEur * form.eurToDkkRate + subNonMaintDocPerBlh[subType])
+            operatingCost += lineCost
+            subGlobalAppliedByOption[opt].blh += blh
+            subGlobalAppliedByOption[opt].cost += lineCost
+          })
+        })
+
+        // Apply own "add to all" lines to sub scenarios as well.
+        if (subLegCount > 0) {
+          ;(['A321', 'A321N', 'A339'] as const).forEach((aircraft) => {
+            ownGlobalLinesByAircraft[aircraft].forEach((line) => {
+              const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? 0
+              if (blh <= 0) return
+              const lineCost = blh * 2 * ownDocPerBlhByAircraft[aircraft]
+              operatingCost += lineCost
+              ownGlobalAppliedByAircraft[aircraft].blh += blh
+              ownGlobalAppliedByAircraft[aircraft].cost += lineCost
+            })
+          })
+        }
+
+        // Apply sub "add to all" lines to own-only scenarios as well.
+        if (hasOwnAircraftLeg && subLegCount === 0) {
+          ;([1, 2, 3] as const).forEach((opt) => {
+            subGlobalLinesByOption[opt].forEach((line) => {
+              const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? 0
+              if (blh <= 0) return
+              const subType = opt === 3 ? 'SUB Widebody' : 'SUB Narrowbody'
+              const subBlhCostEur = opt === 3 ? sub3BlhCostEur : opt === 2 ? sub2BlhCostEur : sub1BlhCostEur
+              const lineCost = blh * 2 * (subBlhCostEur * form.eurToDkkRate + subNonMaintDocPerBlh[subType])
+              operatingCost += lineCost
+              subGlobalAppliedByOption[opt].blh += blh
+              subGlobalAppliedByOption[opt].cost += lineCost
+            })
+          })
+        }
 
         const requestedPaxByRouteLeg = activeLegs.map((leg, legIdx) => ({
           index: legIdx,
@@ -1040,8 +1232,7 @@ function App() {
         const eu261ImpactedPax = scenarioLegInfos.reduce((sum, leg) => sum + (impactedByLeg.get(leg.index) ?? 0), 0)
         const excelBand = primaryRouteInfo?.eu261.bandEur
         const eu261BandEur = excelBand ?? form.eu261ManualBandEur
-        const eu261BandSource: 'excel_distance' | 'manual_fallback' =
-          excelBand !== null && excelBand !== undefined ? 'excel_distance' : 'manual_fallback'
+        const eu261BandSource: 'excel_distance' | 'manual_fallback' = 'manual_fallback'
         const eu261CostEur = eu261ImpactedPax * eu261BandEur
         const eu261CostDkk = eu261CostEur * form.eurToDkkRate
 
@@ -1102,6 +1293,23 @@ function App() {
             details.push(`Sub add-ons (HOTAC/Crew per diem): ${toCurrency(subAddOnCostDkk)}.`)
           }
         }
+        ;(['A321', 'A321N', 'A339'] as const).forEach((aircraft) => {
+          const applied = ownGlobalAppliedByAircraft[aircraft]
+          if (applied.blh > 0) {
+            details.push(
+              `Global own posi from ${aircraft}: ${applied.blh.toFixed(2)} BLH -> ${toCurrency(applied.cost)} (applied to other results only).`,
+            )
+          }
+        })
+        ;([1, 2, 3] as const).forEach((opt) => {
+          const applied = subGlobalAppliedByOption[opt]
+          if (applied.blh > 0) {
+            const optionLabel = opt === 3 ? 'Option 3 (Widebody)' : `Option ${opt} (Narrowbody)`
+            details.push(
+              `Global sub posi from ${optionLabel}: ${applied.blh.toFixed(2)} BLH -> ${toCurrency(applied.cost)} (applied to other results only).`,
+            )
+          }
+        })
         if (overflowPax > 0) {
           const overflowLegDetail = overflowByRouteLeg
             .filter((leg) => leg.overflow > 0)
@@ -1149,6 +1357,11 @@ function App() {
     finalDestination,
     firstOrigin,
     form,
+    baselineByAircraft,
+    ownBlhDefaults,
+    ownDocPerBlhByAircraft,
+    ownSeatDefaults,
+    subNonMaintDocPerBlh,
     primaryRouteInfo,
     availableScenarioOptions,
   ])
@@ -1157,6 +1370,28 @@ function App() {
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }))
+  }
+
+  function toggleAcmiTool() {
+    setForm((prev) => {
+      const enable = !prev.enableAcmiModule
+      return {
+        ...prev,
+        enableAcmiModule: enable,
+        enableAdhocModule: enable ? false : prev.enableAdhocModule,
+      }
+    })
+  }
+
+  function toggleAdhocTool() {
+    setForm((prev) => {
+      const enable = !prev.enableAdhocModule
+      return {
+        ...prev,
+        enableAdhocModule: enable,
+        enableAcmiModule: enable ? false : prev.enableAcmiModule,
+      }
+    })
   }
 
   function updateLeg(key: 'leg1' | 'leg2' | 'leg3' | 'leg4', field: keyof RouteLegInput, value: string | number | '') {
@@ -1174,7 +1409,15 @@ function App() {
     }))
   }
 
-  function updateOwnBaseLine(index: number, updates: { enabled?: boolean; aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>; leg?: Partial<RouteLegInput> }) {
+  function updateOwnBaseLine(
+    index: number,
+    updates: {
+      enabled?: boolean
+      applyToAllResults?: boolean
+      aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+      leg?: Partial<RouteLegInput>
+    },
+  ) {
     setForm((prev) => {
       const next = [...prev.ownBaseLines]
       const current = next[index]
@@ -1240,7 +1483,11 @@ function App() {
     })
   }
 
-  function updateSubBaseLine(type: 'sub1' | 'sub2' | 'sub3', index: number, updates: { enabled?: boolean; leg?: Partial<RouteLegInput> }) {
+  function updateSubBaseLine(
+    type: 'sub1' | 'sub2' | 'sub3',
+    index: number,
+    updates: { enabled?: boolean; applyToAllResults?: boolean; leg?: Partial<RouteLegInput> },
+  ) {
     setForm((prev) => {
       const key = type === 'sub1' ? 'subCharter1Lines' : type === 'sub2' ? 'subCharter2Lines' : 'subCharter3Lines'
       const next = [...prev[key]]
@@ -1305,27 +1552,16 @@ function App() {
 
     lines.forEach((line, index) => {
       const aircraft = (line.aircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
-      const fallback = DEFAULTS_BY_AIRCRAFT[aircraft]
-      const routeData = getLegData(line.leg.from, line.leg.to, aircraft)
-      const blh = routeData?.blh ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? fallback.blh
-      const acmiEligibleDoc =
-        routeData && typeof routeData.acmiEligibleDoc === 'number' ? routeData.acmiEligibleDoc : routeData?.doc ?? 0
-      const docPerBlh =
-        routeData && routeData.blh > 0 ? acmiEligibleDoc / routeData.blh : ACMI_DEFAULT_DOC_PER_BLH_BY_AIRCRAFT[aircraft]
+      const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? ownBlhDefaults[aircraft]
+      const docPerBlh = acmiDocPerBlhByAircraft[aircraft]
       const lineCost = blh * docPerBlh
-      const excludedPerBlh =
-        routeData && routeData.blh > 0 && typeof routeData.acmiExcludedForMinimumPrice === 'number'
-          ? routeData.acmiExcludedForMinimumPrice / routeData.blh
-          : 0
+      const excludedPerBlh = 0
 
       totalBlh += blh
       operatingCost += lineCost
-      details.push(`ACMI leg ${index + 1} (${aircraft}): ${blh.toFixed(2)} BLH * ${docPerBlh.toFixed(2)} = ${toCurrency(lineCost)}`)
-      if (!routeData) {
-        details.push(
-          `ACMI leg ${index + 1} route not in table: using ACMI fallback rate ${ACMI_DEFAULT_DOC_PER_BLH_BY_AIRCRAFT[aircraft].toFixed(2)} DKK/BLH (excludes Fuel/Handling/Turnaround).`,
-        )
-      }
+      details.push(
+        `ACMI leg ${index + 1} (${aircraft}): ${blh.toFixed(2)} BLH * ${docPerBlh.toFixed(2)} = ${toCurrency(lineCost)}`,
+      )
       if (excludedPerBlh > 0) {
         details.push(
           `ACMI leg ${index + 1} excluded from minimum price: Fuel + Handling + Turnaround aircraft + Turnaround pax = ${toCurrency(
@@ -1361,6 +1597,8 @@ function App() {
       details,
     }
   }, [
+    acmiDocPerBlhByAircraft,
+    ownBlhDefaults,
     enabledAcmiLines,
     form.acmiSafetyMarginPercent,
     form.crewCostCabinDays,
@@ -1395,20 +1633,15 @@ function App() {
 
     lines.forEach((line, index) => {
       const aircraft = (line.aircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
-      const fallback = DEFAULTS_BY_AIRCRAFT[aircraft]
-      const routeData = getLegData(line.leg.from, line.leg.to, aircraft)
-      const blh = routeData?.blh ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? fallback.blh
-      const docPerBlh = routeData && routeData.blh > 0 ? routeData.doc / routeData.blh : fallback.docPerBlh
+      const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? ownBlhDefaults[aircraft]
+      const docPerBlh = ownDocPerBlhByAircraft[aircraft]
       const lineCost = blh * docPerBlh
 
       totalBlh += blh
       operatingCost += lineCost
-      details.push(`Adhoc leg ${index + 1} (${aircraft}): ${blh.toFixed(2)} BLH * ${docPerBlh.toFixed(2)} = ${toCurrency(lineCost)}`)
-      if (!routeData) {
-        details.push(
-          `Adhoc leg ${index + 1} route not in table: using default full DOC fallback ${fallback.docPerBlh.toFixed(2)} DKK/BLH.`,
-        )
-      }
+      details.push(
+        `Adhoc leg ${index + 1} (${aircraft}): ${blh.toFixed(2)} BLH * ${docPerBlh.toFixed(2)} = ${toCurrency(lineCost)}`,
+      )
     })
 
     const crewCost =
@@ -1441,6 +1674,8 @@ function App() {
       details,
     }
   }, [
+    ownBlhDefaults,
+    ownDocPerBlhByAircraft,
     enabledAdhocLines,
     form.adhocSafetyMarginPercent,
     form.crewCostCabinDays,
@@ -1460,6 +1695,70 @@ function App() {
     selectedOriginalType,
   ])
 
+  function getFallbackAircraftForAudit(aircraft: AircraftType): Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'> {
+    if (aircraft === 'SUB Widebody') return 'A339'
+    return 'A321'
+  }
+
+  function getDefaultComponentPerBlhForAudit(
+    aircraft: AircraftType,
+  ): Partial<Record<keyof NonNullable<AircraftRouteData['docComponents']>, number>> {
+    if (aircraft === 'SUB Widebody') {
+      return baselineByAircraft['SUB Widebody'].componentsPerBlh
+    }
+    if (aircraft === 'SUB Narrowbody') {
+      return baselineByAircraft['SUB Narrowbody'].componentsPerBlh
+    }
+    return baselineByAircraft[aircraft].componentsPerBlh
+  }
+
+  function getAuditComponentSummary(
+    aircraft: AircraftType,
+    legs: Array<Pick<RouteLegInput, 'from' | 'to' | 'depUtc' | 'arrUtc'>>,
+  ): AuditComponentSummary {
+    const componentTotals = DOC_COMPONENT_KEYS.reduce(
+      (acc, key) => {
+        acc[key] = 0
+        return acc
+      },
+      {} as Record<keyof NonNullable<AircraftRouteData['docComponents']>, number>,
+    )
+
+    let blhTotal = 0
+    let docTotal = 0
+    let fallbackLegCount = 0
+
+    legs.forEach((leg) => {
+      const fallbackAircraft = getFallbackAircraftForAudit(aircraft)
+      const fallbackBlh =
+        aircraft === 'SUB Narrowbody'
+          ? baselineByAircraft['SUB Narrowbody'].blh
+          : aircraft === 'SUB Widebody'
+            ? baselineByAircraft['SUB Widebody'].blh
+            : ownBlhDefaults[fallbackAircraft]
+      const fallbackDocPerBlh =
+        aircraft === 'SUB Narrowbody'
+          ? sumComponentsPerBlh(baselineByAircraft['SUB Narrowbody'].componentsPerBlh)
+          : aircraft === 'SUB Widebody'
+            ? sumComponentsPerBlh(baselineByAircraft['SUB Widebody'].componentsPerBlh)
+            : ownDocPerBlhByAircraft[fallbackAircraft]
+      const blh = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc) ?? fallbackBlh
+      const doc = blh * fallbackDocPerBlh
+
+      blhTotal += blh
+      docTotal += doc
+
+      const defaultPerBlh = getDefaultComponentPerBlhForAudit(aircraft)
+      DOC_COMPONENT_KEYS.forEach((key) => {
+        const perBlh = defaultPerBlh[key] ?? 0
+        componentTotals[key] += perBlh * blh
+      })
+      fallbackLegCount += 1
+    })
+
+    return { blhTotal, docTotal, componentTotals, fallbackLegCount }
+  }
+
   return (
     <main className="app">
       <header>
@@ -1475,18 +1774,34 @@ function App() {
               <button
                 type="button"
                 className={form.enableAcmiModule ? 'tool-toggle-btn active' : 'tool-toggle-btn'}
-                onClick={() => update('enableAcmiModule', !form.enableAcmiModule)}
+                onClick={(event) => {
+                  event.currentTarget.blur()
+                  toggleAcmiTool()
+                }}
               >
                 ACMI tool
               </button>
               <button
                 type="button"
                 className={form.enableAdhocModule ? 'tool-toggle-btn active' : 'tool-toggle-btn'}
-                onClick={() => update('enableAdhocModule', !form.enableAdhocModule)}
+                onClick={(event) => {
+                  event.currentTarget.blur()
+                  toggleAdhocTool()
+                }}
               >
                 Adhoc tool
               </button>
             </div>
+            <button
+              type="button"
+              className={showBaselinePanel ? 'tool-toggle-btn active' : 'tool-toggle-btn'}
+              onClick={(event) => {
+                event.currentTarget.blur()
+                setShowBaselinePanel((prev) => !prev)
+              }}
+            >
+              Baseline parameters
+            </button>
             <label className="top-rate-label">
               EUR to DKK rate
               <input
@@ -1503,7 +1818,72 @@ function App() {
           </div>
         </div>
 
-        {!isToolMode ? (
+        {showBaselinePanel ? (
+          <div className="settings-box section-card">
+            <h3>Baseline parameters</h3>
+            <div className="grid compact">
+              <label>
+                Aircraft
+                <select
+                  value={selectedBaselineAircraft}
+                  onChange={(event) => setSelectedBaselineAircraft(event.target.value as BaselineAircraftKey)}
+                >
+                  {BASELINE_AIRCRAFT_OPTIONS.map((aircraft) => (
+                    <option key={`baseline-air-${aircraft}`} value={aircraft}>
+                      {aircraft}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                BLH default
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={baselineByAircraft[selectedBaselineAircraft].blh}
+                  onChange={(event) =>
+                    setBaselineByAircraft((prev) => ({
+                      ...prev,
+                      [selectedBaselineAircraft]: {
+                        ...prev[selectedBaselineAircraft],
+                        blh: roundToTwo(Number(event.target.value) || 0),
+                      },
+                    }))
+                  }
+                />
+              </label>
+            </div>
+            <div className="baseline-params-grid">
+              {DOC_COMPONENT_KEYS.map((key) => (
+                <label key={`baseline-param-${selectedBaselineAircraft}-${key}`}>
+                  {DOC_COMPONENT_LABELS[key]} (DKK/BLH)
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={baselineByAircraft[selectedBaselineAircraft].componentsPerBlh[key]}
+                    onChange={(event) => {
+                      const value = roundToTwo(Number(event.target.value) || 0)
+                      setBaselineByAircraft((prev) => ({
+                        ...prev,
+                        [selectedBaselineAircraft]: {
+                          ...prev[selectedBaselineAircraft],
+                          componentsPerBlh: {
+                            ...prev[selectedBaselineAircraft].componentsPerBlh,
+                            [key]: value,
+                          },
+                        },
+                      }))
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {!showBaselinePanel && !isToolMode ? (
           <>
             <div className="grid compact">
               <label>
@@ -1671,7 +2051,7 @@ function App() {
           </>
         ) : null}
 
-        {form.enableOwnScaFlights ? (
+        {form.enableOwnScaFlights && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>SCA extra positioning flights</h3>
           <div className="route-grid four-lines">
@@ -1685,6 +2065,15 @@ function App() {
                     onChange={(event) => updateOwnBaseLine(idx, { enabled: event.target.checked })}
                   />
                   Active
+                </label>
+                <label className="mini-check">
+                  <input
+                    type="checkbox"
+                    checked={line.applyToAllResults}
+                    onChange={(event) => updateOwnBaseLine(idx, { applyToAllResults: event.target.checked })}
+                    disabled={!line.enabled}
+                  />
+                  Add to all results
                 </label>
                 <select
                   value={line.aircraft}
@@ -1724,7 +2113,7 @@ function App() {
           </div>
         ) : null}
 
-        {form.enableSubOption1 ? (
+        {form.enableSubOption1 && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>Subcharter Option 1 (Narrowbody)</h3>
           <div className="grid compact">
@@ -1765,6 +2154,15 @@ function App() {
                     onChange={(event) => updateSubBaseLine('sub1', idx, { enabled: event.target.checked })}
                   />
                   Active
+                </label>
+                <label className="mini-check">
+                  <input
+                    type="checkbox"
+                    checked={line.applyToAllResults}
+                    onChange={(event) => updateSubBaseLine('sub1', idx, { applyToAllResults: event.target.checked })}
+                    disabled={!line.enabled}
+                  />
+                  Add to all results
                 </label>
                 <input
                   value={line.leg.from}
@@ -1824,7 +2222,7 @@ function App() {
           </div>
         ) : null}
 
-        {form.enableSubOption2 ? (
+        {form.enableSubOption2 && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>Subcharter Option 2 (Narrowbody)</h3>
           <div className="grid compact">
@@ -1865,6 +2263,15 @@ function App() {
                     onChange={(event) => updateSubBaseLine('sub2', idx, { enabled: event.target.checked })}
                   />
                   Active
+                </label>
+                <label className="mini-check">
+                  <input
+                    type="checkbox"
+                    checked={line.applyToAllResults}
+                    onChange={(event) => updateSubBaseLine('sub2', idx, { applyToAllResults: event.target.checked })}
+                    disabled={!line.enabled}
+                  />
+                  Add to all results
                 </label>
                 <input
                   value={line.leg.from}
@@ -1924,7 +2331,7 @@ function App() {
           </div>
         ) : null}
 
-        {form.enableSubOption3 ? (
+        {form.enableSubOption3 && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>Subcharter Option 3 (Widebody)</h3>
           <div className="grid compact">
@@ -1965,6 +2372,15 @@ function App() {
                     onChange={(event) => updateSubBaseLine('sub3', idx, { enabled: event.target.checked })}
                   />
                   Active
+                </label>
+                <label className="mini-check">
+                  <input
+                    type="checkbox"
+                    checked={line.applyToAllResults}
+                    onChange={(event) => updateSubBaseLine('sub3', idx, { applyToAllResults: event.target.checked })}
+                    disabled={!line.enabled}
+                  />
+                  Add to all results
                 </label>
                 <input
                   value={line.leg.from}
@@ -2024,7 +2440,7 @@ function App() {
           </div>
         ) : null}
 
-        {form.enableAcmiModule ? (
+        {form.enableAcmiModule && !showBaselinePanel ? (
           <div className="tool-module-panel section-card">
             <h3>ACMI module</h3>
             <div className="route-grid four-lines">
@@ -2106,7 +2522,7 @@ function App() {
           </div>
         ) : null}
 
-        {form.enableAdhocModule ? (
+        {form.enableAdhocModule && !showBaselinePanel ? (
           <div className="tool-module-panel section-card">
             <h3>Adhoc module</h3>
             <div className="route-grid four-lines">
@@ -2190,6 +2606,7 @@ function App() {
           </div>
         ) : null}
 
+        {!showBaselinePanel ? (
         <div className="post-sub-section">
           <div className="post-sub-groups">
             {!(form.enableAcmiModule || form.enableAdhocModule) ? (
@@ -2392,8 +2809,10 @@ function App() {
 
           <p className="eu261-note">All times are UTC. The first active lines are used in scenario calculation.</p>
         </div>
+        ) : null}
       </section>
 
+      {!showBaselinePanel ? (
       <section className="panel result-panel">
         <h2>Result</h2>
         {activeLegs.length === 0 ? (
@@ -2460,7 +2879,155 @@ function App() {
           </>
         )}
       </section>
+      ) : null}
       </div>
+
+      {!showBaselinePanel ? (
+      <section className="panel audit-panel">
+        <details>
+          <summary>Audit - detailed calculation trace</summary>
+          {!isToolMode ? (
+            <div className="audit-body">
+              {form.originalType && activeLegs.length > 0 ? (
+                <div className="audit-block">
+                  <h3>Original baseline ({form.originalType})</h3>
+                  <p>EUR to DKK: {form.eurToDkkRate.toFixed(2)}</p>
+                  {(() => {
+                    const baselineSummary = getAuditComponentSummary(selectedOriginalType, activeLegs)
+                    return (
+                      <ul className="audit-kv-list">
+                        <li>BLH total: {baselineSummary.blhTotal.toFixed(2)}</li>
+                        <li>DOC total: {toCurrency(baselineSummary.docTotal)}</li>
+                        {DOC_COMPONENT_KEYS.map((key) => (
+                          <li key={`audit-baseline-${key}`}>
+                            {DOC_COMPONENT_LABELS[key]}: {toCurrency(baselineSummary.componentTotals[key])}
+                          </li>
+                        ))}
+                      </ul>
+                    )
+                  })()}
+                  <ul>
+                    {activeLegs.map((leg, idx) => {
+                      const blh =
+                        durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc) ??
+                        ownBlhDefaults[selectedOriginalType]
+                      const doc = blh * ownDocPerBlhByAircraft[selectedOriginalType]
+                      return (
+                        <li key={`audit-original-leg-${idx}`}>
+                          Leg {idx + 1} {leg.from}-{leg.to}: BLH {blh.toFixed(2)}, DOC {toCurrency(doc)}, Pax {leg.pax}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </div>
+              ) : null}
+
+              {results.map((result) => {
+                const option = scenarioOptionById.get(result.id)
+                const optionLegs = option?.legs ?? []
+                return (
+                  <div className="audit-block" key={`audit-result-${result.id}`}>
+                    <h3>{result.name}</h3>
+                    <p>Difference vs original: {toSignedDkkDelta(result.evaluatedTotalDkk)}</p>
+                    <p>Overflow cost: {toCurrency(result.overflowCost)}</p>
+                    <p>EU261 (separate): {toEur(result.eu261CostEur)}</p>
+                    <details>
+                      <summary>Result formula details</summary>
+                      <ul>
+                        {result.details.map((line) => (
+                          <li key={`${result.id}-${line}`}>{line}</li>
+                        ))}
+                      </ul>
+                    </details>
+                    {optionLegs.length > 0 ? (
+                      <details>
+                        <summary>Excel component reference (for scenario aircraft)</summary>
+                        {Array.from(new Set(optionLegs)).map((aircraft) => (
+                          <div key={`${result.id}-${aircraft}`} className="audit-mini-block">
+                            <strong>{aircraft}</strong>
+                            {(() => {
+                              const aircraftSummary = getAuditComponentSummary(aircraft, activeLegs)
+                              return (
+                                <ul className="audit-kv-list">
+                                  <li>BLH total: {aircraftSummary.blhTotal.toFixed(2)}</li>
+                                  <li>DOC total: {toCurrency(aircraftSummary.docTotal)}</li>
+                                  {DOC_COMPONENT_KEYS.map((key) => (
+                                    <li key={`${result.id}-${aircraft}-sum-${key}`}>
+                                      {DOC_COMPONENT_LABELS[key]}: {toCurrency(aircraftSummary.componentTotals[key])}
+                                    </li>
+                                  ))}
+                                </ul>
+                              )
+                            })()}
+                            <ul>
+                              {activeLegs.map((leg, idx) => {
+                                const fallbackAircraft = getFallbackAircraftForAudit(aircraft)
+                                const blh =
+                                  durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc) ??
+                                  (aircraft === 'SUB Narrowbody'
+                                    ? baselineByAircraft['SUB Narrowbody'].blh
+                                    : aircraft === 'SUB Widebody'
+                                      ? baselineByAircraft['SUB Widebody'].blh
+                                      : ownBlhDefaults[fallbackAircraft])
+                                const defaultPerBlh = getDefaultComponentPerBlhForAudit(aircraft)
+                                const components = DOC_COMPONENT_KEYS.reduce(
+                                  (acc, key) => {
+                                    acc[key] = (defaultPerBlh[key] ?? 0) * blh
+                                    return acc
+                                  },
+                                  {} as Record<keyof NonNullable<AircraftRouteData['docComponents']>, number>,
+                                )
+                                const line = DOC_COMPONENT_KEYS.map((key) => `${DOC_COMPONENT_LABELS[key]} ${Math.round(components[key])}`).join(', ')
+                                return (
+                                  <li key={`${result.id}-${aircraft}-leg-${idx}`}>
+                                    Leg {idx + 1} {leg.from}-{leg.to}: {line}
+                                  </li>
+                                )
+                              })}
+                            </ul>
+                          </div>
+                        ))}
+                      </details>
+                    ) : null}
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="audit-body">
+              {form.enableAcmiModule && acmiBreakdown ? (
+                <div className="audit-block">
+                  <h3>ACMI Audit</h3>
+                  <p>Total BLH: {acmiBreakdown.totalBlh.toFixed(2)}</p>
+                  <p>Total cost: {toCurrency(acmiBreakdown.totalCostDkk)}</p>
+                  <p>Minimum BLH (DKK): {toCurrency(acmiBreakdown.minimumBlhDkk)}</p>
+                  <p>Minimum BLH (EUR): {toEur(acmiBreakdown.minimumBlhEur)}</p>
+                  <ul>
+                    {acmiBreakdown.details.map((line) => (
+                      <li key={`acmi-audit-${line}`}>{line}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {form.enableAdhocModule && adhocBreakdown ? (
+                <div className="audit-block">
+                  <h3>Adhoc Audit</h3>
+                  <p>Total BLH: {adhocBreakdown.totalBlh.toFixed(2)}</p>
+                  <p>Total cost before margin: {toCurrency(adhocBreakdown.totalCostDkk)}</p>
+                  <p>Minimum total (DKK): {toCurrency(adhocBreakdown.minimumTotalDkk)}</p>
+                  <p>Minimum total (EUR): {toEur(adhocBreakdown.minimumTotalEur)}</p>
+                  <ul>
+                    {adhocBreakdown.details.map((line) => (
+                      <li key={`adhoc-audit-${line}`}>{line}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </details>
+      </section>
+      ) : null}
     </main>
   )
 }
