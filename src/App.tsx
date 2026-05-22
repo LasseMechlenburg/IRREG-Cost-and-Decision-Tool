@@ -1236,13 +1236,14 @@ function App() {
         const eu261CostEur = eu261ImpactedPax * eu261BandEur
         const eu261CostDkk = eu261CostEur * form.eurToDkkRate
 
-        const crewCost =
+        const ownCrewCost =
           hasOwnAircraftLeg
             ? form.crewCostFcDays * form.crewCostFcDkkPerDay +
               form.crewCostFoDays * form.crewCostFoDkkPerDay +
-              form.crewCostCabinDays * form.crewCostCabinDkkPerDay +
-              form.crewCostCabinSdDays * form.crewCostCabinSdDkkPerDay
+              form.crewCostCabinDays * form.crewCostCabinDkkPerDay
             : 0
+        const subCabinSdCost = subLegCount > 0 ? form.crewCostCabinSdDays * form.crewCostCabinSdDkkPerDay : 0
+        const crewCost = ownCrewCost + subCabinSdCost
         const ownScaExtrasCostDkk =
           hasOwnAircraftLeg
             ? (form.ownIncludeScaExtraHotac ? ownScaExtraHotacDkk : 0) +
@@ -1255,7 +1256,15 @@ function App() {
           operatingCost - baselineCreditDkk + overflowCost + crewCost + ownScaExtrasCostDkk + conveniencePenalty + subAddOnCostDkk
         const evaluatedTotalDkk = totalCostDkk + eu261CostDkk
 
-        if (crewCost > 0) details.push(`Crew cost (once per solution): ${toCurrency(crewCost)}`)
+        if (crewCost > 0) {
+          details.push(`Crew cost (once per solution): ${toCurrency(crewCost)}`)
+          if (ownCrewCost > 0) {
+            details.push(`Own crew cost (FC/FO/Cabin): ${toCurrency(ownCrewCost)}`)
+          }
+          if (subCabinSdCost > 0) {
+            details.push(`Subcharter crew cost (Cabin SD): ${toCurrency(subCabinSdCost)}`)
+          }
+        }
         if (ownScaExtrasCostDkk > 0) {
           details.push(`SCA extra own add-ons (HOTAC/Crew per diem): ${toCurrency(ownScaExtrasCostDkk)}.`)
         }
@@ -1770,38 +1779,41 @@ function App() {
         <div className="section-top">
           <h2>Input</h2>
           <div className="top-controls">
-            <div className="tool-toggle-row top-tool-row">
-              <button
-                type="button"
-                className={form.enableAcmiModule ? 'tool-toggle-btn active' : 'tool-toggle-btn'}
-                onClick={(event) => {
-                  event.currentTarget.blur()
-                  toggleAcmiTool()
-                }}
-              >
-                ACMI tool
-              </button>
-              <button
-                type="button"
-                className={form.enableAdhocModule ? 'tool-toggle-btn active' : 'tool-toggle-btn'}
-                onClick={(event) => {
-                  event.currentTarget.blur()
-                  toggleAdhocTool()
-                }}
-              >
-                Adhoc tool
-              </button>
+            <div className="admin-tools-box">
+              <h3>Admin Tools</h3>
+              <div className="admin-tools-row">
+                <button
+                  type="button"
+                  className={form.enableAcmiModule ? 'tool-toggle-btn active' : 'tool-toggle-btn'}
+                  onClick={(event) => {
+                    event.currentTarget.blur()
+                    toggleAcmiTool()
+                  }}
+                >
+                  ACMI
+                </button>
+                <button
+                  type="button"
+                  className={form.enableAdhocModule ? 'tool-toggle-btn active' : 'tool-toggle-btn'}
+                  onClick={(event) => {
+                    event.currentTarget.blur()
+                    toggleAdhocTool()
+                  }}
+                >
+                  Adhoc
+                </button>
+                <button
+                  type="button"
+                  className={showBaselinePanel ? 'tool-toggle-btn active' : 'tool-toggle-btn'}
+                  onClick={(event) => {
+                    event.currentTarget.blur()
+                    setShowBaselinePanel((prev) => !prev)
+                  }}
+                >
+                  Baseline parameters
+                </button>
+              </div>
             </div>
-            <button
-              type="button"
-              className={showBaselinePanel ? 'tool-toggle-btn active' : 'tool-toggle-btn'}
-              onClick={(event) => {
-                event.currentTarget.blur()
-                setShowBaselinePanel((prev) => !prev)
-              }}
-            >
-              Baseline parameters
-            </button>
             <label className="top-rate-label">
               EUR to DKK rate
               <input
@@ -1885,6 +1897,71 @@ function App() {
 
         {!showBaselinePanel && !isToolMode ? (
           <>
+            <div className="settings-box section-card">
+              <details>
+                <summary>How to use the main tool</summary>
+                <p>
+                  The main tool compares realistic recovery scenarios for one disrupted operation based on aircraft choice, route setup,
+                  capacity, positioning needs, and selected commercial assumptions.
+                </p>
+                <ul>
+                  <li>
+                    Set <strong>Original aircraft type</strong>, then enter the disrupted operation in <strong>Route (UTC)</strong> with
+                    From, STD, STA, To, and Pax per leg.
+                  </li>
+                  <li>
+                    For each city pair, enter valid <strong>UTC times (STD/STA)</strong> to get relevant BLH calculations.
+                  </li>
+                  <li>
+                    The entered original route (including BLH and operating cost components) is used as the common baseline in all scenarios,
+                    and each result is shown as a difference versus that original baseline.
+                  </li>
+                  <li>
+                    Under <strong>Enabled options</strong>, choose which solution groups should be considered in the result list.
+                  </li>
+                  <li>
+                    In <strong>SCA extra positioning flights</strong>, add own-fleet positioning legs and set aircraft type per line. Use{' '}
+                    <strong>Add to all results</strong> when that positioning impact should also be reflected in other scenarios.
+                  </li>
+                  <li>
+                    In <strong>Subcharter Option 1/2/3</strong>, enter BLH rate, seats, positioning legs, and optional add-ons such as HOTAC
+                    and crew per diem.
+                  </li>
+                  <li>
+                    You can add <strong>Crew cost</strong> for own-aircraft solutions by entering purchased days and daily rates per crew role.
+                    These settings allow you to model the operational impact of buying extra days.
+                  </li>
+                  <li>
+                    <strong>Overflow</strong> is automatic: if scenario seat capacity is below requested Pax, overflow is created per leg and
+                    valued with your <strong>Expected overflow cost per pax</strong>.
+                  </li>
+                  <li>
+                    You can tune compensation exposure with <strong>Pax seeking compensation (%)</strong> and enable <strong>EU261</strong> per
+                    scenario leg directly in result cards.
+                  </li>
+                  <li>
+                    You can model sub-solution quality impact with <strong>NPS detractor per pax on sub (DKK)</strong>.
+                  </li>
+                  <li>
+                    Result cards show difference versus original, capacity, overflow, and full trace in <strong>Cost details</strong>, making
+                    scenario comparison transparent.
+                  </li>
+                  <li>
+                    <strong>Best option</strong> highlights the lowest evaluated cost among currently enabled and valid scenarios.
+                  </li>
+                </ul>
+                <p>
+                  <strong>Example (full walkthrough):</strong> Choose original type <strong>A321N</strong>, enter Leg 1 ARN-PMI and Leg 2
+                  PMI-ARN with pax demand. Enable spare SCA aircraft and set one available <strong>A321</strong> and one <strong>A339</strong>.
+                  Add one active A321 positioning leg (for instance BLL-ARN) and mark <strong>Add to all results</strong> to test broader
+                  operational impact. Then enable Subcharter Option 1 and add one active positioning leg plus HOTAC/crew per diem if relevant.
+                  Finally, adjust <strong>Expected overflow cost per pax</strong>, <strong>Pax seeking compensation (%)</strong>, and{' '}
+                  <strong>NPS detractor per pax on sub</strong>. Compare result cards to see how ranking changes when overflow pressure,
+                  compensation exposure, and sub-penalty assumptions move.
+                </p>
+              </details>
+            </div>
+
             <div className="grid compact">
               <label>
                 Original aircraft type

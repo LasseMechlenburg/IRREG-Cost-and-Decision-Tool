@@ -38,8 +38,30 @@ header p {
   gap: 10px;
 }
 
-.top-tool-row {
-  max-width: 190px;
+.admin-tools-box {
+  border: 1px solid #dbe3ee;
+  border-radius: 10px;
+  padding: 10px;
+  background: #f8fafc;
+  display: grid;
+  gap: 8px;
+}
+
+.admin-tools-box h3 {
+  margin: 0;
+  font-size: 13px;
+  color: #334155;
+}
+
+.admin-tools-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-tools-row .tool-toggle-btn {
+  min-width: 130px;
 }
 
 .top-rate-label {
