@@ -314,6 +314,7 @@ const SCENARIOS: Record<OriginalType, ScenarioOption[]> = {
     { id: 'a321n-sub-wide', name: 'A321N + Subcharter Option 3 (Widebody)', legs: ['A321N', 'SUB Widebody'] },
   ],
   A339: [
+    { id: 'a339', name: 'A339', legs: ['A339'] },
     { id: 'a321', name: 'A321', legs: ['A321'] },
     { id: 'a321n', name: 'A321N', legs: ['A321N'] },
     { id: 'sub', name: 'SUB Narrowbody', legs: ['SUB Narrowbody'] },
@@ -740,24 +741,11 @@ function App() {
     const enabledNarrowOptions: (1 | 2)[] = []
     if (form.enableSubOption1) enabledNarrowOptions.push(1)
     if (form.enableSubOption2) enabledNarrowOptions.push(2)
-    const maxLegPax = activeLegs.reduce((max, leg) => Math.max(max, typeof leg.pax === 'number' ? leg.pax : 0), 0)
-    const enabledSingleCapacities: number[] = []
-    if (form.enableOwnScaFlights) {
-      if (form.ownAvailableA321 > 0) enabledSingleCapacities.push(ownSeatDefaults.A321)
-      if (form.ownAvailableA321N > 0) enabledSingleCapacities.push(ownSeatDefaults.A321N)
-      if (form.ownAvailableA339 > 0) enabledSingleCapacities.push(ownSeatDefaults.A339)
-    }
-    if (form.enableSubOption1) enabledSingleCapacities.push(form.subCharter1Seats)
-    if (form.enableSubOption2) enabledSingleCapacities.push(form.subCharter2Seats)
-    if (form.enableSubOption3) enabledSingleCapacities.push(form.subCharter3Seats)
-    const shouldHideComboScenarios =
-      maxLegPax > 0 && enabledSingleCapacities.some((capacity) => capacity >= maxLegPax)
 
     return scenarioOptions.flatMap((option) => {
       const hasNarrow = option.legs.includes('SUB Narrowbody')
       const hasWide = option.legs.includes('SUB Widebody')
       const hasOwn = option.legs.some((leg) => leg !== 'SUB Narrowbody' && leg !== 'SUB Widebody')
-      const isCombinationOption = option.legs.length > 1
       const ownLegDemand = option.legs.reduce(
         (acc, leg) => {
           if (leg === 'A321') acc.A321 += 1
@@ -770,7 +758,6 @@ function App() {
 
       if (hasWide && !form.enableSubOption3) return []
       if (hasOwn && !form.enableOwnScaFlights) return []
-      if (isCombinationOption && shouldHideComboScenarios) return []
       if (ownLegDemand.A321 > form.ownAvailableA321) return []
       if (ownLegDemand.A321N > form.ownAvailableA321N) return []
       if (ownLegDemand.A339 > form.ownAvailableA339) return []
@@ -795,14 +782,9 @@ function App() {
     form.ownAvailableA321,
     form.ownAvailableA321N,
     form.ownAvailableA339,
-    ownSeatDefaults,
-    form.subCharter1Seats,
-    form.subCharter2Seats,
-    form.subCharter3Seats,
     form.enableSubOption1,
     form.enableSubOption2,
     form.enableSubOption3,
-    activeLegs,
     scenarioOptions,
   ])
 
