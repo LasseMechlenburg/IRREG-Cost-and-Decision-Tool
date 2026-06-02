@@ -18,12 +18,13 @@ type RouteLegInput = {
   depUtc: string
   arrUtc: string
   to: string
-  pax: number | ''
+  pax: number | '' | 'NA'
 }
 
 type OwnBaseLineInput = {
   enabled: boolean
   applyToAllResults: boolean
+  manualBlh: string
   aircraft: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
   leg: RouteLegInput
 }
@@ -31,6 +32,7 @@ type OwnBaseLineInput = {
 type SubBaseLineInput = {
   enabled: boolean
   applyToAllResults: boolean
+  manualBlh: string
   leg: RouteLegInput
 }
 
@@ -92,10 +94,15 @@ type FormState = {
   eu261ImpactedPercent: number
   eu261ManualBandEur: 400 | 600
   npsDetractorPerPaxOnSubDkk: number
+  navblueFlightDate: string
+  navblueFlightNumber: string
+  navblueFetchLegIndex: number
+  navblueInfantsByLeg: [number | '', number | '', number | '', number | '']
 }
 
 type ScenarioEu261Selection = {
   legSelections: boolean[]
+  overnightSelected: boolean
 }
 
 type AircraftRouteData = {
@@ -156,17 +163,20 @@ type CostBreakdown = {
   overflowPax: number
   overflowCost: number
   eu261CostEur: number
+  overnightCostEur: number
   eu261ImpactedPax: number
   eu261BandEur: number
   eu261BandSource: 'excel_distance' | 'manual_fallback'
   crewCost: number
   conveniencePenalty: number
+  overnightSelected: boolean
   details: string[]
 }
 
 type EnabledSubCharterLine = {
   enabled: boolean
   applyToAllResults: boolean
+  manualBlh: string
   leg: RouteLegInput
   charter: 1 | 2 | 3
   subType: 'SUB Narrowbody' | 'SUB Widebody'
@@ -195,6 +205,9 @@ type BaselineComponentKey = keyof NonNullable<AircraftRouteData['docComponents']
 type BaselineAircraftParameters = {
   blh: number
   componentsPerBlh: Record<BaselineComponentKey, number>
+  ownershipCostPerBlh: number
+  maintenanceFixedPerBlh: number
+  insurancePerFlight: number
 }
 
 const DOC_COMPONENT_KEYS: Array<keyof NonNullable<AircraftRouteData['docComponents']>> = [
@@ -228,6 +241,8 @@ const DOC_COMPONENT_LABELS: Record<keyof NonNullable<AircraftRouteData['docCompo
 }
 
 const BASELINE_AIRCRAFT_OPTIONS: BaselineAircraftKey[] = ['A321', 'A321N', 'A339', 'SUB Narrowbody', 'SUB Widebody']
+const NAVBLUE_USERNAME = import.meta.env.VITE_NAVBLUE_USERNAME?.trim() ?? ''
+const NAVBLUE_PASSWORD = import.meta.env.VITE_NAVBLUE_PASSWORD?.trim() ?? ''
 
 function sumComponentsPerBlh(components: Record<BaselineComponentKey, number>): number {
   return DOC_COMPONENT_KEYS.reduce((sum, key) => sum + (components[key] ?? 0), 0)
@@ -370,11 +385,66 @@ function emptyLeg(): RouteLegInput {
 }
 
 function emptyOwnBaseLine(): OwnBaseLineInput {
-  return { enabled: false, applyToAllResults: false, aircraft: '', leg: emptyLeg() }
+  return { enabled: false, applyToAllResults: false, manualBlh: '', aircraft: '', leg: emptyLeg() }
 }
 
 function emptySubBaseLine(): SubBaseLineInput {
-  return { enabled: false, applyToAllResults: false, leg: emptyLeg() }
+  return { enabled: false, applyToAllResults: false, manualBlh: '', leg: emptyLeg() }
+}
+
+function normalizeBlhInput(input: string): string {
+  return input.replace(/[^0-9:]/g, '').slice(0, 5)
+}
+
+function parseBlhHours(input: string): number | null {
+  const normalized = normalizeBlhInput(input)
+  const match = /^(\d{1,2}):([0-5]\d)$/.exec(normalized)
+  if (!match) return null
+  return Number(match[1]) + Number(match[2]) / 60
+}
+
+function formatBlhFromHours(hours: number | null): string {
+  if (hours === null || !Number.isFinite(hours) || hours < 0) return ''
+  const whole = Math.floor(hours)
+  const mins = Math.round((hours - whole) * 60)
+  return `${String(whole).padStart(2, '0')}:${String(mins).padStart(2, '0')}`
+}
+
+function hasPositioningBlhInput(line: { manualBlh: string; leg: RouteLegInput }): boolean {
+  const manual = parseBlhHours(line.manualBlh)
+  if (manual !== null && manual > 0) return true
+  const timed = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)
+  return timed !== null && timed > 0
+}
+
+function hasTimedBlh(leg: RouteLegInput): boolean {
+  const timed = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc)
+  return timed !== null && timed > 0
+}
+
+function hasStationsAndTimes(leg: RouteLegInput): boolean {
+  return hasStations(leg) && hasTimedBlh(leg)
+}
+
+function getIataSeasonForDate(inputDate: string): 'S' | 'W' {
+  const baseDate = (() => {
+    const [year, month, day] = inputDate.split('-').map((part) => Number(part))
+    if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
+      return new Date(Date.UTC(year, month - 1, day))
+    }
+    return new Date()
+  })()
+
+  const year = baseDate.getUTCFullYear()
+  const marchLastDay = new Date(Date.UTC(year, 3, 0))
+  const marchOffset = marchLastDay.getUTCDay()
+  const lastSundayMarch = new Date(Date.UTC(year, 2, marchLastDay.getUTCDate() - marchOffset))
+
+  const octoberLastDay = new Date(Date.UTC(year, 10, 0))
+  const octoberOffset = octoberLastDay.getUTCDay()
+  const lastSundayOctober = new Date(Date.UTC(year, 9, octoberLastDay.getUTCDate() - octoberOffset))
+
+  return baseDate >= lastSundayMarch && baseDate < lastSundayOctober ? 'S' : 'W'
 }
 
 function normalizeStation(input: string): string {
@@ -395,7 +465,7 @@ function normalizeLegInput(input: RouteLegInput): RouteLegInput {
     depUtc: normalizeUtcInput(input.depUtc),
     arrUtc: normalizeUtcInput(input.arrUtc),
     to: normalizeStation(input.to),
-    pax: typeof input.pax === 'number' ? input.pax : '',
+    pax: typeof input.pax === 'number' ? input.pax : input.pax === 'NA' ? 'NA' : '',
   }
 }
 
@@ -558,6 +628,10 @@ const INITIAL_FORM: FormState = {
   eu261ImpactedPercent: (data.eu261Defaults?.impactedPaxRatio ?? 0.35) * 100,
   eu261ManualBandEur: 400,
   npsDetractorPerPaxOnSubDkk: 0,
+  navblueFlightDate: '',
+  navblueFlightNumber: '',
+  navblueFetchLegIndex: 0,
+  navblueInfantsByLeg: ['', '', '', ''],
 }
 
 function App() {
@@ -577,20 +651,35 @@ function App() {
         {} as Record<BaselineComponentKey, number>,
       )
       const blh = roundToTwo(Number(data.aircraftComponentDefaults?.[aircraftCode]?.avgBlh ?? 0) || 0)
-      return { blh, componentsPerBlh }
+      const ownershipCostPerBlh = aircraftCode === 'A321' || aircraftCode === 'A321N' ? 8283 : aircraftCode === 'A339' ? 13155 : 0
+      const maintenanceFixedPerBlh = aircraftCode === 'A321' || aircraftCode === 'A321N' || aircraftCode === 'A339' ? 5260 : 0
+      const insurancePerFlight = aircraftCode === 'A321' || aircraftCode === 'A321N' || aircraftCode === 'A339' ? 3000 : 0
+      return { blh, componentsPerBlh, ownershipCostPerBlh, maintenanceFixedPerBlh, insurancePerFlight }
     }
 
     const a321 = fromDefault('A321')
     const a321n = fromDefault('A321N')
     const a339 = fromDefault('A339')
     const subNarrow = fromDefault('SUB_NARROWBODY')
-    const subWide = { ...a339, componentsPerBlh: { ...a339.componentsPerBlh } }
+    const subWide = {
+      ...a339,
+      componentsPerBlh: { ...a339.componentsPerBlh },
+      ownershipCostPerBlh: 0,
+      maintenanceFixedPerBlh: 0,
+      insurancePerFlight: 0,
+    }
+    const subNarrowAdjusted = {
+      ...subNarrow,
+      ownershipCostPerBlh: 0,
+      maintenanceFixedPerBlh: 0,
+      insurancePerFlight: 0,
+    }
 
     return {
       A321: a321,
       A321N: a321n,
       A339: a339,
-      'SUB Narrowbody': subNarrow,
+      'SUB Narrowbody': subNarrowAdjusted,
       'SUB Widebody': subWide,
     }
   })
@@ -647,12 +736,15 @@ function App() {
     [baselineByAircraft],
   )
   const ownSeatDefaults = useMemo(
-    () => ({
-      A321: DEFAULT_SEATS_BY_AIRCRAFT.A321,
-      A321N: DEFAULT_SEATS_BY_AIRCRAFT.A321N,
-      A339: DEFAULT_SEATS_BY_AIRCRAFT.A339,
-    }),
-    [],
+    () => {
+      const season = getIataSeasonForDate(form.navblueFlightDate)
+      return {
+        A321: DEFAULT_SEATS_BY_AIRCRAFT.A321,
+        A321N: DEFAULT_SEATS_BY_AIRCRAFT.A321N,
+        A339: season === 'S' ? 385 : 373,
+      }
+    },
+    [form.navblueFlightDate],
   )
   const scenarioOptions = form.originalType ? SCENARIOS[form.originalType] : []
   const selectedOriginalType: OriginalType = form.originalType || 'A321'
@@ -712,7 +804,7 @@ function App() {
   )
 
   const enabledOwnLines = useMemo(
-    () => normalizedOwnLines.filter((line) => line.enabled && hasStations(line.leg)),
+    () => normalizedOwnLines.filter((line) => line.enabled && hasPositioningBlhInput(line)),
     [normalizedOwnLines],
   )
   const enabledAcmiLines = useMemo(
@@ -726,13 +818,13 @@ function App() {
   const enabledSubLines = useMemo(
     () => [
       ...normalizedSub1Lines
-        .filter((line) => line.enabled && hasStations(line.leg))
+        .filter((line) => line.enabled && hasPositioningBlhInput(line))
         .map((line) => ({ ...line, charter: 1 as const, subType: 'SUB Narrowbody' as const })),
       ...normalizedSub2Lines
-        .filter((line) => line.enabled && hasStations(line.leg))
+        .filter((line) => line.enabled && hasPositioningBlhInput(line))
         .map((line) => ({ ...line, charter: 2 as const, subType: 'SUB Narrowbody' as const })),
       ...normalizedSub3Lines
-        .filter((line) => line.enabled && hasStations(line.leg))
+        .filter((line) => line.enabled && hasPositioningBlhInput(line))
         .map((line) => ({ ...line, charter: 3 as const, subType: 'SUB Widebody' as const })),
     ],
     [normalizedSub1Lines, normalizedSub2Lines, normalizedSub3Lines],
@@ -844,7 +936,7 @@ function App() {
         let ownSeatCapacity = 0
         let subSeatCapacity = 0
         const subLegCount = option.legs.filter((x) => x === 'SUB Narrowbody' || x === 'SUB Widebody').length
-        const eu261Selection = eu261ByScenario[option.id] ?? { legSelections: option.legs.map(() => false) }
+        const eu261Selection = eu261ByScenario[option.id] ?? { legSelections: option.legs.map(() => false), overnightSelected: false }
         const scenarioLegInfos: { index: number; isSub: boolean; seats: number; includeEu261: boolean; label: string }[] = []
         const eu261LegOptions: { index: number; label: string; checked: boolean }[] = []
         const eu261IncludedInEvaluation = eu261Selection.legSelections.some(Boolean)
@@ -1001,7 +1093,9 @@ function App() {
             return sum + fallbackBlh
           }, 0)
 
-          let positioningBlhOneWay = line ? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? 0 : 0
+          let positioningBlhOneWay = line
+            ? ((parseBlhHours(line.manualBlh) ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)) ?? 0)
+            : 0
           if (currentSubType && currentSubTypeLegIndex === 0) {
             const extraPositioningBlh = (() => {
               const extraLines =
@@ -1011,7 +1105,11 @@ function App() {
                     ].slice(subScenarioLegCountByType[currentSubType])
                   : subWideLines.slice(subScenarioLegCountByType[currentSubType])
               return extraLines.reduce(
-                (sum, extraLine) => sum + (durationHoursFromUtcTimes(extraLine.leg.depUtc, extraLine.leg.arrUtc) ?? 0),
+                (sum, extraLine) =>
+                  sum +
+                  ((parseBlhHours(extraLine.manualBlh) ??
+                    durationHoursFromUtcTimes(extraLine.leg.depUtc, extraLine.leg.arrUtc)) ??
+                    0),
                 0,
               )
             })()
@@ -1020,7 +1118,14 @@ function App() {
             const ownAircraft = aircraft as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
             const extraOwnPositioningBlh = ownLinesByAircraft[ownAircraft]
               .slice(ownScenarioLegCountByAircraft[ownAircraft])
-              .reduce((sum, extraLine) => sum + (durationHoursFromUtcTimes(extraLine.leg.depUtc, extraLine.leg.arrUtc) ?? 0), 0)
+              .reduce(
+                (sum, extraLine) =>
+                  sum +
+                  ((parseBlhHours(extraLine.manualBlh) ??
+                    durationHoursFromUtcTimes(extraLine.leg.depUtc, extraLine.leg.arrUtc)) ??
+                    0),
+                0,
+              )
             positioningBlhOneWay += extraOwnPositioningBlh
           }
           const totalBlh = legBlhTotal + positioningBlhOneWay * 2
@@ -1089,7 +1194,7 @@ function App() {
         ;(['A321', 'A321N', 'A339'] as const).forEach((aircraft) => {
           if (ownScenarioHasType[aircraft]) return
           ownGlobalLinesByAircraft[aircraft].forEach((line) => {
-            const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? 0
+            const blh = (parseBlhHours(line.manualBlh) ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)) ?? 0
             if (blh <= 0) return
             const lineCost = blh * 2 * ownDocPerBlhByAircraft[aircraft]
             operatingCost += lineCost
@@ -1112,7 +1217,7 @@ function App() {
         ;([1, 2, 3] as const).forEach((opt) => {
           if (subScenarioUsesOption[opt]) return
           subGlobalLinesByOption[opt].forEach((line) => {
-            const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? 0
+            const blh = (parseBlhHours(line.manualBlh) ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)) ?? 0
             if (blh <= 0) return
             const subType = opt === 3 ? 'SUB Widebody' : 'SUB Narrowbody'
             const subBlhCostEur = opt === 3 ? sub3BlhCostEur : opt === 2 ? sub2BlhCostEur : sub1BlhCostEur
@@ -1127,7 +1232,7 @@ function App() {
         if (subLegCount > 0) {
           ;(['A321', 'A321N', 'A339'] as const).forEach((aircraft) => {
             ownGlobalLinesByAircraft[aircraft].forEach((line) => {
-              const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? 0
+              const blh = (parseBlhHours(line.manualBlh) ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)) ?? 0
               if (blh <= 0) return
               const lineCost = blh * 2 * ownDocPerBlhByAircraft[aircraft]
               operatingCost += lineCost
@@ -1141,7 +1246,7 @@ function App() {
         if (hasOwnAircraftLeg && subLegCount === 0) {
           ;([1, 2, 3] as const).forEach((opt) => {
             subGlobalLinesByOption[opt].forEach((line) => {
-              const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? 0
+              const blh = (parseBlhHours(line.manualBlh) ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)) ?? 0
               if (blh <= 0) return
               const subType = opt === 3 ? 'SUB Widebody' : 'SUB Narrowbody'
               const subBlhCostEur = opt === 3 ? sub3BlhCostEur : opt === 2 ? sub2BlhCostEur : sub1BlhCostEur
@@ -1217,6 +1322,9 @@ function App() {
         const eu261BandSource: 'excel_distance' | 'manual_fallback' = 'manual_fallback'
         const eu261CostEur = eu261ImpactedPax * eu261BandEur
         const eu261CostDkk = eu261CostEur * form.eurToDkkRate
+        const overnightImpactedPax = Math.min(totalSeats, scenarioRequestedPax)
+        const overnightCostEur = eu261Selection.overnightSelected ? overnightImpactedPax * 205 : 0
+        const overnightCostDkk = overnightCostEur * form.eurToDkkRate
 
         const ownCrewCost =
           hasOwnAircraftLeg
@@ -1234,8 +1342,37 @@ function App() {
         const subPaxEstimate = Math.min(scenarioRequestedPax, totalSeats) * (subLegCount / Math.max(option.legs.length, 1))
         const conveniencePenalty = Math.round(subPaxEstimate) * form.npsDetractorPerPaxOnSubDkk
         const baselineCreditDkk = originalMainBlhTotal * originalDocPerBlh
+        const ownLegCount = option.legs.filter((leg) => leg === 'A321' || leg === 'A321N' || leg === 'A339').length
+        const ownershipAndFixedCostDkk = option.legs.reduce((sum, leg) => {
+          if (leg === 'SUB Narrowbody' || leg === 'SUB Widebody') return sum
+          const params = baselineByAircraft[leg]
+          const legBlh = activeLegs.reduce((blhSum, routeLeg) => {
+            const timeBlh = durationHoursFromUtcTimes(routeLeg.depUtc, routeLeg.arrUtc)
+            return blhSum + (timeBlh && timeBlh > 0 ? timeBlh : ownBlhDefaults[leg])
+          }, 0)
+          return sum + legBlh * params.ownershipCostPerBlh + legBlh * params.maintenanceFixedPerBlh
+        }, 0)
+        const insuranceCostDkk = option.legs.reduce((sum, leg) => {
+          if (leg === 'SUB Narrowbody' || leg === 'SUB Widebody') return sum
+          return sum + baselineByAircraft[leg].insurancePerFlight
+        }, 0)
+        const baselineOwnershipAndFixedCreditDkk =
+          originalMainBlhTotal *
+          (baselineByAircraft[selectedOriginalType].ownershipCostPerBlh + baselineByAircraft[selectedOriginalType].maintenanceFixedPerBlh)
+        const baselineInsuranceCreditDkk = baselineByAircraft[selectedOriginalType].insurancePerFlight
         const totalCostDkk =
-          operatingCost - baselineCreditDkk + overflowCost + crewCost + ownScaExtrasCostDkk + conveniencePenalty + subAddOnCostDkk
+          operatingCost -
+          baselineCreditDkk +
+          overflowCost +
+          crewCost +
+          ownScaExtrasCostDkk +
+          conveniencePenalty +
+          subAddOnCostDkk +
+          overnightCostDkk +
+          ownershipAndFixedCostDkk +
+          insuranceCostDkk -
+          baselineOwnershipAndFixedCreditDkk -
+          baselineInsuranceCreditDkk
         const evaluatedTotalDkk = totalCostDkk + eu261CostDkk
 
         if (crewCost > 0) {
@@ -1266,6 +1403,19 @@ function App() {
           details.push(`EU261 load split: ${carriedParts.join(', ')}. Non-affected capacity fills first.`)
         } else {
           details.push('EU261: not included for this solution (checkbox not selected)')
+        }
+        if (overnightCostEur > 0) {
+          details.push(`Overnight: ${overnightImpactedPax} pax * 205 EUR = ${toEur(overnightCostEur)}`)
+        }
+        if (ownershipAndFixedCostDkk > 0) {
+          details.push(
+            `Ownership + Maintenance fixed (SCA): ${toCurrency(ownershipAndFixedCostDkk)} minus baseline ${toCurrency(baselineOwnershipAndFixedCreditDkk)}`,
+          )
+        }
+        if (insuranceCostDkk > 0) {
+          details.push(
+            `Insurance (avg 3000 DKK per own flight): ${toCurrency(insuranceCostDkk)} (own legs: ${ownLegCount}) minus baseline ${toCurrency(baselineInsuranceCreditDkk)}`,
+          )
         }
         if (subLegCount > 0) {
           details.push(
@@ -1331,11 +1481,13 @@ function App() {
           overflowPax,
           overflowCost,
           eu261CostEur,
+          overnightCostEur,
           eu261ImpactedPax,
           eu261BandEur,
           eu261BandSource,
           crewCost,
           conveniencePenalty,
+          overnightSelected: eu261Selection.overnightSelected ?? false,
           details,
         }
       })
@@ -1394,7 +1546,11 @@ function App() {
           field === 'from' || field === 'to'
             ? normalizeStation(String(value))
             : field === 'pax'
-              ? value === '' ? '' : Number(value) || 0
+              ? value === 'NA'
+                ? 'NA'
+                : value === ''
+                  ? ''
+                  : Number(value) || 0
               : normalizeUtcInput(String(value)),
       },
     }))
@@ -1405,6 +1561,7 @@ function App() {
     updates: {
       enabled?: boolean
       applyToAllResults?: boolean
+      manualBlh?: string
       aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
       leg?: Partial<RouteLegInput>
     },
@@ -1417,6 +1574,12 @@ function App() {
       next[index] = {
         ...current,
         ...updates,
+        manualBlh:
+          typeof updates.manualBlh === 'string'
+            ? normalizeBlhInput(updates.manualBlh)
+            : updates.leg
+              ? formatBlhFromHours(durationHoursFromUtcTimes(nextLeg.depUtc, nextLeg.arrUtc))
+              : current.manualBlh,
         leg: {
           from: normalizeStation(nextLeg.from),
           depUtc: normalizeUtcInput(nextLeg.depUtc),
@@ -1477,7 +1640,7 @@ function App() {
   function updateSubBaseLine(
     type: 'sub1' | 'sub2' | 'sub3',
     index: number,
-    updates: { enabled?: boolean; applyToAllResults?: boolean; leg?: Partial<RouteLegInput> },
+    updates: { enabled?: boolean; applyToAllResults?: boolean; manualBlh?: string; leg?: Partial<RouteLegInput> },
   ) {
     setForm((prev) => {
       const key = type === 'sub1' ? 'subCharter1Lines' : type === 'sub2' ? 'subCharter2Lines' : 'subCharter3Lines'
@@ -1488,6 +1651,12 @@ function App() {
       next[index] = {
         ...current,
         ...updates,
+        manualBlh:
+          typeof updates.manualBlh === 'string'
+            ? normalizeBlhInput(updates.manualBlh)
+            : updates.leg
+              ? formatBlhFromHours(durationHoursFromUtcTimes(nextLeg.depUtc, nextLeg.arrUtc))
+              : current.manualBlh,
         leg: {
           from: normalizeStation(nextLeg.from),
           depUtc: normalizeUtcInput(nextLeg.depUtc),
@@ -1497,6 +1666,23 @@ function App() {
         },
       }
 
+      return { ...prev, [key]: next }
+    })
+  }
+
+  function resetOwnBaseLine(index: number) {
+    setForm((prev) => {
+      const next = [...prev.ownBaseLines]
+      next[index] = emptyOwnBaseLine()
+      return { ...prev, ownBaseLines: next }
+    })
+  }
+
+  function resetSubBaseLine(type: 'sub1' | 'sub2' | 'sub3', index: number) {
+    setForm((prev) => {
+      const key = type === 'sub1' ? 'subCharter1Lines' : type === 'sub2' ? 'subCharter2Lines' : 'subCharter3Lines'
+      const next = [...prev[key]]
+      next[index] = emptySubBaseLine()
       return { ...prev, [key]: next }
     })
   }
@@ -1518,6 +1704,24 @@ function App() {
         ...prev,
         [scenarioId]: {
           legSelections: nextLegSelections,
+          overnightSelected: current.overnightSelected ?? false,
+        },
+      }
+    })
+  }
+
+  function updateScenarioOvernightSelection(
+    scenarioId: string,
+    checked: boolean,
+    defaults: ScenarioEu261Selection,
+  ) {
+    setEu261ByScenario((prev) => {
+      const current = prev[scenarioId] ?? defaults
+      return {
+        ...prev,
+        [scenarioId]: {
+          legSelections: current.legSelections,
+          overnightSelected: checked,
         },
       }
     })
@@ -1849,6 +2053,63 @@ function App() {
               </label>
             </div>
             <div className="baseline-params-grid">
+              <label key={`baseline-param-${selectedBaselineAircraft}-ownership`}>
+                Ownership cost (DKK/BLH)
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={baselineByAircraft[selectedBaselineAircraft].ownershipCostPerBlh}
+                  onChange={(event) => {
+                    const value = roundToTwo(Number(event.target.value) || 0)
+                    setBaselineByAircraft((prev) => ({
+                      ...prev,
+                      [selectedBaselineAircraft]: {
+                        ...prev[selectedBaselineAircraft],
+                        ownershipCostPerBlh: value,
+                      },
+                    }))
+                  }}
+                />
+              </label>
+              <label key={`baseline-param-${selectedBaselineAircraft}-maintenance-fixed`}>
+                Maintenance fixed (DKK/BLH)
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={baselineByAircraft[selectedBaselineAircraft].maintenanceFixedPerBlh}
+                  onChange={(event) => {
+                    const value = roundToTwo(Number(event.target.value) || 0)
+                    setBaselineByAircraft((prev) => ({
+                      ...prev,
+                      [selectedBaselineAircraft]: {
+                        ...prev[selectedBaselineAircraft],
+                        maintenanceFixedPerBlh: value,
+                      },
+                    }))
+                  }}
+                />
+              </label>
+              <label key={`baseline-param-${selectedBaselineAircraft}-insurance`}>
+                Insurance (DKK/flight)
+                <input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={baselineByAircraft[selectedBaselineAircraft].insurancePerFlight}
+                  onChange={(event) => {
+                    const value = roundToTwo(Number(event.target.value) || 0)
+                    setBaselineByAircraft((prev) => ({
+                      ...prev,
+                      [selectedBaselineAircraft]: {
+                        ...prev[selectedBaselineAircraft],
+                        insurancePerFlight: value,
+                      },
+                    }))
+                  }}
+                />
+              </label>
               {DOC_COMPONENT_KEYS.map((key) => (
                 <label key={`baseline-param-${selectedBaselineAircraft}-${key}`}>
                   {DOC_COMPONENT_LABELS[key]} (DKK/BLH)
@@ -1906,8 +2167,19 @@ function App() {
                     <strong>Add to all results</strong> when that positioning impact should also be reflected in other scenarios.
                   </li>
                   <li>
+                    For each positioning line you can use either station+times or manual <strong>BLH HH:MM</strong>. If BLH is filled, station
+                    and time fields are locked. If station and valid STD/STA are filled, BLH is auto-derived.
+                  </li>
+                  <li>
+                    Use the per-line <strong>Reset</strong> button to clear a single positioning line quickly without resetting the whole tool.
+                  </li>
+                  <li>
                     In <strong>Subcharter Option 1/2/3</strong>, enter BLH rate, seats, positioning legs, and optional add-ons such as HOTAC
                     and crew per diem.
+                  </li>
+                  <li>
+                    Flight fetch fills route legs sequentially (Leg 1, Leg 2, Leg 3, Leg 4). The sequence resets when you click{' '}
+                    <strong>Reset all fields</strong>.
                   </li>
                   <li>
                     You can add <strong>Crew cost</strong> for own-aircraft solutions by entering purchased days and daily rates per crew role.
@@ -1946,6 +2218,156 @@ function App() {
 
             <div className="grid compact">
               <label>
+                Flight date
+                <input
+                  type="date"
+                  value={form.navblueFlightDate}
+                  onChange={(event) => update('navblueFlightDate', event.target.value)}
+                />
+              </label>
+              <label>
+                Flight number
+                <input
+                  value={form.navblueFlightNumber}
+                  onChange={(event) => update('navblueFlightNumber', event.target.value.toUpperCase())}
+                  placeholder="DK1784"
+                />
+              </label>
+              <label>
+                Fetch flight into Route
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const flightDate = form.navblueFlightDate.trim()
+                    const flightNo = form.navblueFlightNumber.trim().toUpperCase()
+                    if (!flightDate || !flightNo) {
+                      window.alert('Please set flight date and flight number first.')
+                      return
+                    }
+                    if (!NAVBLUE_USERNAME || !NAVBLUE_PASSWORD) {
+                      window.alert('Missing NAVBLUE credentials. Set VITE_NAVBLUE_USERNAME and VITE_NAVBLUE_PASSWORD in .env')
+                      return
+                    }
+                    try {
+                      const [year, month, day] = flightDate.split('-').map((part) => Number(part))
+                      const toDate = (() => {
+                        if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return flightDate
+                        const nextUtcDate = new Date(Date.UTC(year, month - 1, day + 1))
+                        return nextUtcDate.toISOString().slice(0, 10)
+                      })()
+                      const url =
+                        `https://vkg.noc.vmc.navblue.cloud/RestAPI/nocrestapi/v1/flights?From=${encodeURIComponent(flightDate)}` +
+                        `&To=${encodeURIComponent(toDate)}` +
+                        `&FlightRequestFilter=Aircraft&FlightRequestFilter=Loads`
+                      const response = await fetch(url, {
+                        headers: {
+                          Authorization: `Basic ${btoa(`${NAVBLUE_USERNAME}:${NAVBLUE_PASSWORD}`)}`,
+                        },
+                      })
+                      if (!response.ok) {
+                        throw new Error(`NAVBLUE request failed (${response.status})`)
+                      }
+                      const payload = await response.json()
+                      const flights = Array.isArray(payload) ? payload : Array.isArray(payload?.flights) ? payload.flights : []
+                      const flight = flights.find((item: unknown) => {
+                        const record = item as Record<string, unknown>
+                        const rawFlight = record.FlightNumber ?? record.flightNumber ?? record.flightNo ?? record.Number ?? ''
+                        const normalized = String(rawFlight).toUpperCase().replace(/\s+/g, '')
+                        const prefixed = normalized.startsWith('DK') ? normalized : `DK${normalized}`
+                        return normalized === flightNo
+                          || prefixed === flightNo
+                      })
+                      if (!flight) {
+                        window.alert(`No flight found for ${flightNo} in selected date range.`)
+                        return
+                      }
+                      const flightRecord = flight as Record<string, unknown>
+                      const from = normalizeStation(
+                        String(
+                          flightRecord.DepartureAirportCode ??
+                            flightRecord.departureAirportCode ??
+                            flightRecord.from ??
+                            flightRecord.depStation ??
+                            flightRecord.origin ??
+                            '',
+                        ),
+                      )
+                      const to = normalizeStation(
+                        String(
+                          flightRecord.ArrivalAirportCode ??
+                            flightRecord.arrivalAirportCode ??
+                            flightRecord.to ??
+                            flightRecord.arrStation ??
+                            flightRecord.destination ??
+                            '',
+                        ),
+                      )
+                      const depUtcRaw = String(
+                        flightRecord.STD ?? flightRecord.stdUtc ?? flightRecord.std ?? flightRecord.departureUtc ?? '',
+                      )
+                      const arrUtcRaw = String(
+                        flightRecord.STA ?? flightRecord.staUtc ?? flightRecord.sta ?? flightRecord.arrivalUtc ?? '',
+                      )
+                      const depUtc = normalizeUtcInput(depUtcRaw.slice(11, 16) || depUtcRaw)
+                      const arrUtc = normalizeUtcInput(arrUtcRaw.slice(11, 16) || arrUtcRaw)
+                      const aircraftBlock = (flightRecord.Aircraft as Record<string, unknown> | undefined) ?? {}
+                      const aircraftTypeRaw = String(aircraftBlock.Type ?? aircraftBlock.type ?? '').toUpperCase()
+                      const mappedOriginalType: FormState['originalType'] =
+                        aircraftTypeRaw === '32B'
+                          ? 'A321'
+                          : aircraftTypeRaw === '32Q'
+                            ? 'A321N'
+                            : aircraftTypeRaw === '339'
+                              ? 'A339'
+                              : ''
+                      const loads = (flightRecord.Loads as Record<string, unknown> | undefined) ?? {}
+                      const booked = (loads.BookedPassengerPerWeight as Record<string, unknown> | undefined) ?? {}
+                      const adultsRaw = Number(booked.Adults)
+                      const childrenRaw = Number(booked.Children)
+                      const hasBookedPax = Number.isFinite(adultsRaw) || Number.isFinite(childrenRaw)
+                      const adults = Number.isFinite(adultsRaw) ? adultsRaw : 0
+                      const children = Number.isFinite(childrenRaw) ? childrenRaw : 0
+                      const infants = Number(booked.Infants ?? 0) || 0
+                      const pax = adults + children
+                      const legKey = (() => {
+                        const idx = Math.max(0, Math.min(3, form.navblueFetchLegIndex))
+                        return (['leg1', 'leg2', 'leg3', 'leg4'] as const)[idx]
+                      })()
+                      const legIndex = Math.max(0, Math.min(3, form.navblueFetchLegIndex))
+                      const nextLegIndex = Math.min(3, form.navblueFetchLegIndex + 1)
+                      if (!from || !to || !depUtc || !arrUtc) {
+                        window.alert('Flight found, but mandatory route fields are missing in API response.')
+                        return
+                      }
+                      setForm((prev) => {
+                        const nextInfants = [...prev.navblueInfantsByLeg] as [number | '', number | '', number | '', number | '']
+                        nextInfants[legIndex] = infants > 0 ? infants : ''
+                        return {
+                          ...prev,
+                          originalType: mappedOriginalType || prev.originalType,
+                          [legKey]: {
+                            ...prev[legKey],
+                            from,
+                            depUtc,
+                            arrUtc,
+                            to,
+                            pax: hasBookedPax ? pax : 'NA',
+                          },
+                          navblueFetchLegIndex: nextLegIndex,
+                          navblueInfantsByLeg: nextInfants,
+                        }
+                      })
+                    } catch (error) {
+                      const message = error instanceof Error ? error.message : 'Unknown NAVBLUE error'
+                      window.alert(`Could not fetch NAVBLUE flight: ${message}`)
+                    }
+                  }}
+                >
+                  Fetch
+                </button>
+                <span>Next fetch goes to Leg {Math.max(1, Math.min(4, form.navblueFetchLegIndex + 1))}</span>
+              </label>
+              <label>
                 Original aircraft type
                 <select
                   value={form.originalType}
@@ -1968,12 +2390,23 @@ function App() {
                 <input value={form.leg1.arrUtc} onChange={(event) => updateLeg('leg1', 'arrUtc', event.target.value)} placeholder="STA" />
                 <input value={form.leg1.to} onChange={(event) => updateLeg('leg1', 'to', event.target.value)} placeholder="To" />
                 <input
-                  type="number"
-                  min={0}
+                  type="text"
+                  inputMode="numeric"
                   value={form.leg1.pax}
-                  onChange={(event) => updateLeg('leg1', 'pax', event.target.value === '' ? '' : Number(event.target.value))}
+                  onChange={(event) =>
+                    updateLeg(
+                      'leg1',
+                      'pax',
+                      event.target.value === ''
+                        ? ''
+                        : event.target.value.toUpperCase() === 'NA'
+                          ? 'NA'
+                          : Number(event.target.value),
+                    )
+                  }
                   placeholder="Pax"
                 />
+                <span>{form.navblueInfantsByLeg[0] !== '' ? `Infants: ${form.navblueInfantsByLeg[0]}` : ''}</span>
               </div>
 
               <div className="route-row">
@@ -1983,12 +2416,23 @@ function App() {
                 <input value={form.leg2.arrUtc} onChange={(event) => updateLeg('leg2', 'arrUtc', event.target.value)} placeholder="STA" />
                 <input value={form.leg2.to} onChange={(event) => updateLeg('leg2', 'to', event.target.value)} placeholder="To" />
                 <input
-                  type="number"
-                  min={0}
+                  type="text"
+                  inputMode="numeric"
                   value={form.leg2.pax}
-                  onChange={(event) => updateLeg('leg2', 'pax', event.target.value === '' ? '' : Number(event.target.value))}
+                  onChange={(event) =>
+                    updateLeg(
+                      'leg2',
+                      'pax',
+                      event.target.value === ''
+                        ? ''
+                        : event.target.value.toUpperCase() === 'NA'
+                          ? 'NA'
+                          : Number(event.target.value),
+                    )
+                  }
                   placeholder="Pax"
                 />
+                <span>{form.navblueInfantsByLeg[1] !== '' ? `Infants: ${form.navblueInfantsByLeg[1]}` : ''}</span>
               </div>
 
               <div className="route-row">
@@ -1998,12 +2442,23 @@ function App() {
                 <input value={form.leg3.arrUtc} onChange={(event) => updateLeg('leg3', 'arrUtc', event.target.value)} placeholder="STA" />
                 <input value={form.leg3.to} onChange={(event) => updateLeg('leg3', 'to', event.target.value)} placeholder="To" />
                 <input
-                  type="number"
-                  min={0}
+                  type="text"
+                  inputMode="numeric"
                   value={form.leg3.pax}
-                  onChange={(event) => updateLeg('leg3', 'pax', event.target.value === '' ? '' : Number(event.target.value))}
+                  onChange={(event) =>
+                    updateLeg(
+                      'leg3',
+                      'pax',
+                      event.target.value === ''
+                        ? ''
+                        : event.target.value.toUpperCase() === 'NA'
+                          ? 'NA'
+                          : Number(event.target.value),
+                    )
+                  }
                   placeholder="Pax"
                 />
+                <span>{form.navblueInfantsByLeg[2] !== '' ? `Infants: ${form.navblueInfantsByLeg[2]}` : ''}</span>
               </div>
 
               <div className="route-row">
@@ -2013,12 +2468,23 @@ function App() {
                 <input value={form.leg4.arrUtc} onChange={(event) => updateLeg('leg4', 'arrUtc', event.target.value)} placeholder="STA" />
                 <input value={form.leg4.to} onChange={(event) => updateLeg('leg4', 'to', event.target.value)} placeholder="To" />
                 <input
-                  type="number"
-                  min={0}
+                  type="text"
+                  inputMode="numeric"
                   value={form.leg4.pax}
-                  onChange={(event) => updateLeg('leg4', 'pax', event.target.value === '' ? '' : Number(event.target.value))}
+                  onChange={(event) =>
+                    updateLeg(
+                      'leg4',
+                      'pax',
+                      event.target.value === ''
+                        ? ''
+                        : event.target.value.toUpperCase() === 'NA'
+                          ? 'NA'
+                          : Number(event.target.value),
+                    )
+                  }
                   placeholder="Pax"
                 />
+                <span>{form.navblueInfantsByLeg[3] !== '' ? `Infants: ${form.navblueInfantsByLeg[3]}` : ''}</span>
               </div>
             </div>
 
@@ -2113,6 +2579,7 @@ function App() {
         {form.enableOwnScaFlights && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>SCA extra positioning flights</h3>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
           <div className="route-grid four-lines">
             {form.ownBaseLines.map((line, idx) => (
               <div className="route-row with-controls" key={`own-${idx}`}>
@@ -2137,7 +2604,7 @@ function App() {
                 <select
                   value={line.aircraft}
                   onChange={(event) => updateOwnBaseLine(idx, { aircraft: event.target.value as OwnBaseLineInput['aircraft'] })}
-                  disabled={!line.enabled}
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 >
                   <option value="">Select</option>
                   {OWN_AIRCRAFT_OPTIONS.map((aircraft) => (
@@ -2150,22 +2617,36 @@ function App() {
                   value={line.leg.from}
                   onChange={(event) => updateOwnBaseLine(idx, { leg: { from: event.target.value } })}
                   placeholder="From"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.depUtc}
                   onChange={(event) => updateOwnBaseLine(idx, { leg: { depUtc: event.target.value } })}
                   placeholder="STD"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.arrUtc}
                   onChange={(event) => updateOwnBaseLine(idx, { leg: { arrUtc: event.target.value } })}
                   placeholder="STA"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.to}
                   onChange={(event) => updateOwnBaseLine(idx, { leg: { to: event.target.value } })}
                   placeholder="To"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
+                <span>OR</span>
+                <input
+                  value={line.manualBlh}
+                  onChange={(event) => updateOwnBaseLine(idx, { manualBlh: event.target.value })}
+                  placeholder="BLH HH:MM"
+                  disabled={!line.enabled || hasStationsAndTimes(line.leg)}
+                />
+                <button type="button" onClick={() => resetOwnBaseLine(idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
+                  Reset
+                </button>
               </div>
             ))}
           </div>
@@ -2175,6 +2656,7 @@ function App() {
         {form.enableSubOption1 && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>Subcharter Option 1 (Narrowbody)</h3>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
           <div className="grid compact">
             <label>
               BLH cost (EUR)
@@ -2227,22 +2709,36 @@ function App() {
                   value={line.leg.from}
                   onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { from: event.target.value } })}
                   placeholder="From"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.depUtc}
                   onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { depUtc: event.target.value } })}
                   placeholder="STD"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.arrUtc}
                   onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { arrUtc: event.target.value } })}
                   placeholder="STA"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.to}
                   onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { to: event.target.value } })}
                   placeholder="To"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
+                <span>OR</span>
+                <input
+                  value={line.manualBlh}
+                  onChange={(event) => updateSubBaseLine('sub1', idx, { manualBlh: event.target.value })}
+                  placeholder="BLH HH:MM"
+                  disabled={!line.enabled || hasStationsAndTimes(line.leg)}
+                />
+                <button type="button" onClick={() => resetSubBaseLine('sub1', idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
+                  Reset
+                </button>
               </div>
             ))}
           </div>
@@ -2284,6 +2780,7 @@ function App() {
         {form.enableSubOption2 && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>Subcharter Option 2 (Narrowbody)</h3>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
           <div className="grid compact">
             <label>
               BLH cost (EUR)
@@ -2336,22 +2833,36 @@ function App() {
                   value={line.leg.from}
                   onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { from: event.target.value } })}
                   placeholder="From"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.depUtc}
                   onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { depUtc: event.target.value } })}
                   placeholder="STD"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.arrUtc}
                   onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { arrUtc: event.target.value } })}
                   placeholder="STA"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.to}
                   onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { to: event.target.value } })}
                   placeholder="To"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
+                <span>OR</span>
+                <input
+                  value={line.manualBlh}
+                  onChange={(event) => updateSubBaseLine('sub2', idx, { manualBlh: event.target.value })}
+                  placeholder="BLH HH:MM"
+                  disabled={!line.enabled || hasStationsAndTimes(line.leg)}
+                />
+                <button type="button" onClick={() => resetSubBaseLine('sub2', idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
+                  Reset
+                </button>
               </div>
             ))}
           </div>
@@ -2393,6 +2904,7 @@ function App() {
         {form.enableSubOption3 && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>Subcharter Option 3 (Widebody)</h3>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
           <div className="grid compact">
             <label>
               BLH cost (EUR)
@@ -2445,22 +2957,36 @@ function App() {
                   value={line.leg.from}
                   onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { from: event.target.value } })}
                   placeholder="From"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.depUtc}
                   onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { depUtc: event.target.value } })}
                   placeholder="STD"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.arrUtc}
                   onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { arrUtc: event.target.value } })}
                   placeholder="STA"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
                 <input
                   value={line.leg.to}
                   onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { to: event.target.value } })}
                   placeholder="To"
+                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
                 />
+                <span>OR</span>
+                <input
+                  value={line.manualBlh}
+                  onChange={(event) => updateSubBaseLine('sub3', idx, { manualBlh: event.target.value })}
+                  placeholder="BLH HH:MM"
+                  disabled={!line.enabled || hasStationsAndTimes(line.leg)}
+                />
+                <button type="button" onClick={() => resetSubBaseLine('sub3', idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
+                  Reset
+                </button>
               </div>
             ))}
           </div>
@@ -2897,6 +3423,7 @@ function App() {
                     {toSignedDkkDelta(result.evaluatedTotalDkk)}
                   </p>
                   <p>EU261 (EUR, separat): {toEur(result.eu261CostEur)}</p>
+                  <p>Overnight (EUR, separat): {toEur(result.overnightCostEur)}</p>
                   <p>Pax Seeking compensation (%) ({form.eu261ImpactedPercent.toFixed(0)}%): {result.eu261ImpactedPax}</p>
                   <div className="result-eu261-controls">
                     {result.eu261LegOptions.map((legOption) => (
@@ -2909,13 +3436,27 @@ function App() {
                               result.id,
                               legOption.index,
                               event.target.checked,
-                              { legSelections: result.eu261LegOptions.map(() => false) },
+                              { legSelections: result.eu261LegOptions.map(() => false), overnightSelected: false },
                             )
                           }
                         />
                         EU261 on {legOption.label}
                       </label>
                     ))}
+                    <label key={`${result.id}-overnight`}>
+                      <input
+                        type="checkbox"
+                        checked={result.overnightSelected}
+                        onChange={(event) =>
+                          updateScenarioOvernightSelection(
+                            result.id,
+                            event.target.checked,
+                            { legSelections: result.eu261LegOptions.map(() => false), overnightSelected: false },
+                          )
+                        }
+                      />
+                      Overnight (205 EUR per pax)
+                    </label>
                   </div>
                   {result.subNarrowbodyOptionLabel ? (
                     <p>SUB Narrowbody calculated as: {result.subNarrowbodyOptionLabel}</p>

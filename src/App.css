@@ -214,12 +214,12 @@ header p {
 }
 
 .route-row.with-controls {
-  grid-template-columns: 62px 70px 110px 86px repeat(4, 72px);
+  grid-template-columns: 62px 70px 110px 86px repeat(4, 72px) 28px 138px 70px;
   gap: 6px;
 }
 
 .route-row.with-controls.sub-row {
-  grid-template-columns: 62px 70px 110px repeat(4, 72px);
+  grid-template-columns: 62px 70px 110px repeat(4, 72px) 28px 138px 70px;
   gap: 6px;
 }
 
