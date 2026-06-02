@@ -243,6 +243,8 @@ const DOC_COMPONENT_LABELS: Record<keyof NonNullable<AircraftRouteData['docCompo
 const BASELINE_AIRCRAFT_OPTIONS: BaselineAircraftKey[] = ['A321', 'A321N', 'A339', 'SUB Narrowbody', 'SUB Widebody']
 const NAVBLUE_USERNAME = import.meta.env.VITE_NAVBLUE_USERNAME?.trim() ?? ''
 const NAVBLUE_PASSWORD = import.meta.env.VITE_NAVBLUE_PASSWORD?.trim() ?? ''
+const OCDC_BASE_URL = (import.meta.env.VITE_OCDC_BASE_URL?.trim() ?? '').replace(/\/+$/, '')
+const OCDC_API_KEY = import.meta.env.VITE_OCDC_API_KEY?.trim() ?? ''
 
 function sumComponentsPerBlh(components: Record<BaselineComponentKey, number>): number {
   return DOC_COMPONENT_KEYS.reduce((sum, key) => sum + (components[key] ?? 0), 0)
@@ -457,6 +459,64 @@ function normalizeUtcInput(input: string): string {
     return `${cleaned.slice(0, 2)}:${cleaned.slice(2, 4)}`
   }
   return cleaned
+}
+
+function normalizeFlightNumber(input: string): string {
+  const normalized = input.trim().toUpperCase().replace(/\s+/g, '')
+  return normalized.startsWith('DK') ? normalized : `DK${normalized}`
+}
+
+function parseRaidoBookedPax(booked: Record<string, unknown>): { pax: number; infants: number } | null {
+  const adultsRaw = Number(booked.Adults)
+  const childrenRaw = Number(booked.Children)
+  const hasBookedPax = Number.isFinite(adultsRaw) || Number.isFinite(childrenRaw)
+  if (!hasBookedPax) {
+    return null
+  }
+
+  const adults = Number.isFinite(adultsRaw) ? adultsRaw : 0
+  const children = Number.isFinite(childrenRaw) ? childrenRaw : 0
+  const infants = Number(booked.Infants ?? 0) || 0
+  return { pax: adults + children, infants }
+}
+
+function buildOcdcFlightKey(flightNumber: string, flightDate: string, from: string, to: string): string | null {
+  const normalizedFlightNumber = normalizeFlightNumber(flightNumber)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(flightDate) || from.length !== 3 || to.length !== 3) {
+    return null
+  }
+  return `${normalizedFlightNumber}_${flightDate}_${from}-${to}`
+}
+
+async function fetchPhoenixBookedPax(flightKey: string): Promise<{ pax: number; infants: number } | null> {
+  if (!OCDC_BASE_URL || !OCDC_API_KEY) {
+    return null
+  }
+
+  const response = await fetch(
+    `${OCDC_BASE_URL}/api/v1/phoenix/flight-key/${encodeURIComponent(flightKey)}/passenger-services`,
+    {
+      headers: {
+        'x-api-key': OCDC_API_KEY,
+      },
+    },
+  )
+
+  if (!response.ok) {
+    return null
+  }
+
+  const payload = await response.json()
+  const paxRaw = Number(payload?.data?.parsedPage?.pax?.totalPax)
+  if (!Number.isFinite(paxRaw)) {
+    return null
+  }
+
+  const infantsRaw = Number(payload?.data?.parsedPage?.pax?.infants)
+  return {
+    pax: paxRaw,
+    infants: Number.isFinite(infantsRaw) ? infantsRaw : 0,
+  }
 }
 
 function normalizeLegInput(input: RouteLegInput): RouteLegInput {
@@ -2322,13 +2382,7 @@ function App() {
                               : ''
                       const loads = (flightRecord.Loads as Record<string, unknown> | undefined) ?? {}
                       const booked = (loads.BookedPassengerPerWeight as Record<string, unknown> | undefined) ?? {}
-                      const adultsRaw = Number(booked.Adults)
-                      const childrenRaw = Number(booked.Children)
-                      const hasBookedPax = Number.isFinite(adultsRaw) || Number.isFinite(childrenRaw)
-                      const adults = Number.isFinite(adultsRaw) ? adultsRaw : 0
-                      const children = Number.isFinite(childrenRaw) ? childrenRaw : 0
-                      const infants = Number(booked.Infants ?? 0) || 0
-                      const pax = adults + children
+                      const raidoPax = parseRaidoBookedPax(booked)
                       const legKey = (() => {
                         const idx = Math.max(0, Math.min(3, form.navblueFetchLegIndex))
                         return (['leg1', 'leg2', 'leg3', 'leg4'] as const)[idx]
@@ -2339,6 +2393,10 @@ function App() {
                         window.alert('Flight found, but mandatory route fields are missing in API response.')
                         return
                       }
+                      const flightKey = buildOcdcFlightKey(flightNo, flightDate, from, to)
+                      const phoenixPax = raidoPax ?? (flightKey ? await fetchPhoenixBookedPax(flightKey) : null)
+                      const resolvedPax = phoenixPax?.pax ?? 'NA'
+                      const infants = phoenixPax?.infants ?? 0
                       setForm((prev) => {
                         const nextInfants = [...prev.navblueInfantsByLeg] as [number | '', number | '', number | '', number | '']
                         nextInfants[legIndex] = infants > 0 ? infants : ''
@@ -2351,7 +2409,7 @@ function App() {
                             depUtc,
                             arrUtc,
                             to,
-                            pax: hasBookedPax ? pax : 'NA',
+                            pax: resolvedPax,
                           },
                           navblueFetchLegIndex: nextLegIndex,
                           navblueInfantsByLeg: nextInfants,
