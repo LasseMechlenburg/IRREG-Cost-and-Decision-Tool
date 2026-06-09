@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import docData from './data/docData.json'
 
@@ -27,6 +27,7 @@ type OwnBaseLineInput = {
   applyToAllResults: boolean
   manualBlh: string
   manualBlhOverride: boolean
+  flightNumber: string
   aircraft: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
   leg: RouteLegInput
 }
@@ -190,6 +191,8 @@ type EnabledSubCharterLine = {
 
 type AcmiBreakdown = {
   totalBlh: number
+  baseCostDkk: number
+  marginDkk: number
   totalCostDkk: number
   minimumBlhDkk: number
   minimumBlhEur: number
@@ -199,11 +202,20 @@ type AcmiBreakdown = {
 type AdhocBreakdown = {
   totalBlh: number
   totalCostDkk: number
+  marginDkk: number
   minimumTotalDkk: number
   minimumTotalEur: number
   minimumBlhDkk: number
   minimumBlhEur: number
   details: string[]
+}
+
+type ScenarioHistoryEntry = {
+  id: string
+  createdAt: string
+  mode: 'main' | 'acmi' | 'adhoc'
+  title: string
+  summaryLines: string[]
 }
 
 type BaselineAircraftKey = 'A321' | 'A321N' | 'A339' | 'SUB Narrowbody' | 'SUB Widebody'
@@ -395,7 +407,15 @@ function emptyLeg(): RouteLegInput {
 }
 
 function emptyOwnBaseLine(): OwnBaseLineInput {
-  return { enabled: false, applyToAllResults: false, manualBlh: '', manualBlhOverride: false, aircraft: '', leg: emptyLeg() }
+  return {
+    enabled: false,
+    applyToAllResults: false,
+    manualBlh: '',
+    manualBlhOverride: false,
+    flightNumber: '',
+    aircraft: '',
+    leg: emptyLeg(),
+  }
 }
 
 function emptySubBaseLine(): SubBaseLineInput {
@@ -525,6 +545,22 @@ function normalizeUtcInput(input: string): string {
 function normalizeFlightNumber(input: string): string {
   const normalized = input.trim().toUpperCase().replace(/\s+/g, '')
   return normalized.startsWith('DK') ? normalized : `DK${normalized}`
+}
+
+function normalizeOptionalFlightNumber(input: string): string {
+  const normalized = input.trim().toUpperCase().replace(/\s+/g, '')
+  if (!normalized) return ''
+  return normalized.startsWith('DK') ? normalized : `DK${normalized}`
+}
+
+function formatSubjectDate(input: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input)) return '[DATE]'
+  const [, monthStr, dayStr, yearStr] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input) ?? []
+  if (!monthStr || !dayStr || !yearStr) return '[DATE]'
+  const monthNames = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+  const monthIdx = Number(monthStr) - 1
+  if (monthIdx < 0 || monthIdx > 11) return '[DATE]'
+  return `${dayStr}${monthNames[monthIdx]}${yearStr.slice(-2)}`
 }
 
 function parseRaidoBookedPax(booked: Record<string, unknown>): { pax: number; infants: number } | null {
@@ -777,8 +813,14 @@ function App() {
     leg3: '',
     leg4: '',
   })
+  const [scenarioHistory, setScenarioHistory] = useState<ScenarioHistoryEntry[]>([])
   const [showBaselinePanel, setShowBaselinePanel] = useState(false)
   const [selectedBaselineAircraft, setSelectedBaselineAircraft] = useState<BaselineAircraftKey>('A321')
+  const lastHistorySignatureByMode = useRef<Record<'main' | 'acmi' | 'adhoc', string>>({
+    main: '',
+    acmi: '',
+    adhoc: '',
+  })
   const isToolMode = form.enableAcmiModule || form.enableAdhocModule
   const [baselineByAircraft, setBaselineByAircraft] = useState<Record<BaselineAircraftKey, BaselineAircraftParameters>>(() => {
     const fromDefault = (aircraftCode: 'A321' | 'A321N' | 'A339' | 'SUB_NARROWBODY'): BaselineAircraftParameters => {
@@ -1666,6 +1708,7 @@ function App() {
 
   const cheapest = results[0]
 
+
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }))
   }
@@ -1807,7 +1850,7 @@ function App() {
     })
   }
 
-  function updateAcmiLine(index: number, updates: { enabled?: boolean; aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>; leg?: Partial<RouteLegInput> }) {
+  function updateAcmiLine(index: number, updates: { enabled?: boolean; aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>; flightNumber?: string; leg?: Partial<RouteLegInput> }) {
     setForm((prev) => {
       const next = [...prev.acmiLines]
       const current = next[index]
@@ -1818,6 +1861,8 @@ function App() {
       next[index] = {
         ...current,
         ...updates,
+        flightNumber:
+          typeof updates.flightNumber === 'string' ? normalizeOptionalFlightNumber(updates.flightNumber) : current.flightNumber,
         manualBlhOverride: hasManualBlh,
         manualBlh: hasManualBlh ? normalizedBlh : formatBlhFromHours(durationHoursFromUtcTimes(nextLeg.depUtc, nextLeg.arrUtc)),
         leg: {
@@ -1834,7 +1879,7 @@ function App() {
     })
   }
 
-  function updateAdhocLine(index: number, updates: { enabled?: boolean; aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>; leg?: Partial<RouteLegInput> }) {
+  function updateAdhocLine(index: number, updates: { enabled?: boolean; aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>; flightNumber?: string; leg?: Partial<RouteLegInput> }) {
     setForm((prev) => {
       const next = [...prev.adhocLines]
       const current = next[index]
@@ -1845,6 +1890,8 @@ function App() {
       next[index] = {
         ...current,
         ...updates,
+        flightNumber:
+          typeof updates.flightNumber === 'string' ? normalizeOptionalFlightNumber(updates.flightNumber) : current.flightNumber,
         manualBlhOverride: hasManualBlh,
         manualBlh: hasManualBlh ? normalizedBlh : formatBlhFromHours(durationHoursFromUtcTimes(nextLeg.depUtc, nextLeg.arrUtc)),
         leg: {
@@ -1992,6 +2039,71 @@ function App() {
     setCityPairFailedByLine({})
   }
 
+  function withFallback(value: string, placeholder: string): string {
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : `[${placeholder}]`
+  }
+
+  function buildModuleRoutingRows(lines: OwnBaseLineInput[], modulePrefix: 'ACMI' | 'Adhoc') {
+    return lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.enabled)
+      .map(({ line, index }) => {
+        const derivedBlh = derivePositioningBlh(line)
+        const blhText = derivedBlh > 0 ? formatBlhFromHours(derivedBlh) : withFallback(line.leg.blh, 'BLH')
+        return {
+          lineLabel: `${modulePrefix} #${index + 1}`,
+          flightNumber: withFallback(line.flightNumber, 'FlightNo'),
+          from: withFallback(line.leg.from, 'From'),
+          to: withFallback(line.leg.to, 'To'),
+          std: withFallback(line.leg.depUtc, 'STD'),
+          sta: withFallback(line.leg.arrUtc, 'STA'),
+          blh: blhText,
+        }
+      })
+  }
+
+  function buildModuleRoutingOverview(lines: OwnBaseLineInput[], modulePrefix: 'ACMI' | 'Adhoc'): string[] {
+    return buildModuleRoutingRows(lines, modulePrefix).map(
+      (row) => `${row.lineLabel}: FLT ${row.flightNumber} | ${row.from}-${row.to} | STD ${row.std} | STA ${row.sta} | BLH ${row.blh}`,
+    )
+  }
+
+  function pushScenarioHistory(mode: 'main' | 'acmi' | 'adhoc', signature: string, title: string, summaryLines: string[]) {
+    if (!signature || lastHistorySignatureByMode.current[mode] === signature) return
+    lastHistorySignatureByMode.current[mode] = signature
+    const entry: ScenarioHistoryEntry = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      createdAt: new Date().toLocaleString(),
+      mode,
+      title,
+      summaryLines,
+    }
+    setScenarioHistory((prev) => [entry, ...prev].slice(0, 60))
+  }
+
+  function buildAsciiTable(headers: string[], rows: string[][]): string[] {
+    const widths = headers.map((header, idx) => {
+      const rowMax = rows.reduce((max, row) => Math.max(max, (row[idx] ?? '').length), 0)
+      return Math.max(header.length, rowMax)
+    })
+    const separator = `+${widths.map((width) => '-'.repeat(width + 2)).join('+')}+`
+    const toLine = (cells: string[]) =>
+      `| ${cells
+        .map((cell, idx) => (cell ?? '').padEnd(widths[idx], ' '))
+        .join(' | ')} |`
+    return [separator, toLine(headers), separator, ...rows.map((row) => toLine(row)), separator]
+  }
+
+  function openEmailDraft(subject: string, bodyLines: string[]) {
+    const body = bodyLines.join('\n')
+    window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+  }
+
+  function kvLine(label: string, value: string): string {
+    return `${label.padEnd(22)} ${value}`
+  }
+
   const acmiBreakdown = useMemo<AcmiBreakdown | null>(() => {
     if (!form.enableAcmiModule) return null
     const lines = enabledAcmiLines
@@ -2035,7 +2147,9 @@ function App() {
       (form.ownIncludeScaExtraHotac ? ownScaExtraHotacDkk : 0) +
       (form.ownIncludeScaExtraCrewPerDiem ? ownScaExtraCrewPerDiemEur * form.eurToDkkRate : 0)
     const marginMultiplier = 1 + Math.max(0, form.acmiSafetyMarginPercent) / 100
-    const totalCostDkk = (operatingCost + crewCost + ownAddOns) * marginMultiplier
+    const baseCostDkk = operatingCost + crewCost + ownAddOns
+    const totalCostDkk = baseCostDkk * marginMultiplier
+    const marginDkk = totalCostDkk - baseCostDkk
     const minimumBlhDkk = totalBlh > 0 ? totalCostDkk / totalBlh : 0
     const minimumBlhEur = form.eurToDkkRate > 0 ? minimumBlhDkk / form.eurToDkkRate : 0
 
@@ -2046,6 +2160,8 @@ function App() {
 
     return {
       totalBlh,
+      baseCostDkk,
+      marginDkk,
       totalCostDkk,
       minimumBlhDkk,
       minimumBlhEur,
@@ -2111,6 +2227,7 @@ function App() {
     const baseTotalDkk = operatingCost + crewCost + ownAddOns
     const marginMultiplier = 1 + Math.max(0, form.adhocSafetyMarginPercent) / 100
     const minimumTotalDkk = baseTotalDkk * marginMultiplier
+    const marginDkk = minimumTotalDkk - baseTotalDkk
     const minimumTotalEur = form.eurToDkkRate > 0 ? minimumTotalDkk / form.eurToDkkRate : 0
     const minimumBlhDkk = totalBlh > 0 ? minimumTotalDkk / totalBlh : 0
     const minimumBlhEur = form.eurToDkkRate > 0 ? minimumBlhDkk / form.eurToDkkRate : 0
@@ -2123,6 +2240,7 @@ function App() {
     return {
       totalBlh,
       totalCostDkk: baseTotalDkk,
+      marginDkk,
       minimumTotalDkk,
       minimumTotalEur,
       minimumBlhDkk,
@@ -2149,6 +2267,338 @@ function App() {
     form.ownIncludeScaExtraHotac,
     form.ownScaExtraCrewPerDiemEur,
     form.ownScaExtraHotacDkk,
+    selectedOriginalType,
+  ])
+
+  function composeAcmiInternalEmail() {
+    if (!acmiBreakdown) return
+    const aircraft = form.acmiAircraft || selectedOriginalType
+    const flightNumbers = form.acmiLines
+      .filter((line) => line.enabled && line.flightNumber.trim().length > 0)
+      .map((line) => line.flightNumber.trim())
+    const flightRef = flightNumbers.length > 0 ? flightNumbers.join('/') : '[FLTNO]'
+    const dateRef = formatSubjectDate(form.navblueFlightDate)
+    const subject = `ACMI Offer ${flightRef} ${dateRef}`
+    const crewFcCost = form.crewCostFcDays * form.crewCostFcDkkPerDay
+    const crewFoCost = form.crewCostFoDays * form.crewCostFoDkkPerDay
+    const crewCabinCost = form.crewCostCabinDays * form.crewCostCabinDkkPerDay
+    const crewCabinSdCost = form.crewCostCabinSdDays * form.crewCostCabinSdDkkPerDay
+    const crewTotal = crewFcCost + crewFoCost + crewCabinCost + crewCabinSdCost
+    const acmiAircraft = (form.acmiAircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+    const acmiOperatingCost = enabledAcmiLines.reduce((sum, line) => {
+      const blh = derivePositioningBlh(line) || ownBlhDefaults[acmiAircraft]
+      return sum + blh * acmiDocPerBlhByAircraft[acmiAircraft]
+    }, 0)
+    const acmiAddOns =
+      (form.ownIncludeScaExtraHotac ? (typeof form.ownScaExtraHotacDkk === 'number' ? form.ownScaExtraHotacDkk : 0) : 0) +
+      (form.ownIncludeScaExtraCrewPerDiem
+        ? (typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0) * form.eurToDkkRate
+        : 0)
+    const acmiHotacDkk = form.ownIncludeScaExtraHotac ? (typeof form.ownScaExtraHotacDkk === 'number' ? form.ownScaExtraHotacDkk : 0) : 0
+    const acmiCrewPerDiemDkk = form.ownIncludeScaExtraCrewPerDiem
+      ? (typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0) * form.eurToDkkRate
+      : 0
+    const routingRows = buildModuleRoutingRows(form.acmiLines, 'ACMI')
+    openEmailDraft(subject, [
+      'Hello,',
+      '',
+      'ACMI OFFER - PRICE DETAILS',
+      kvLine('Flight date:', withFallback(form.navblueFlightDate, 'Flight date')),
+      kvLine('Aircraft type:', aircraft),
+      kvLine('EUR/DKK rate:', form.eurToDkkRate.toFixed(2)),
+      '',
+      'ROUTING',
+      ...(routingRows.length === 0
+        ? ['No active legs yet']
+        : routingRows.map(
+            (row, idx) =>
+              `${idx + 1}) ${row.flightNumber}  ${row.from}-${row.to}  STD ${row.std}  STA ${row.sta}  BLH ${row.blh}`,
+          )),
+      '',
+      'SCA CREW COSTS (DKK)',
+      kvLine('FC:', `${form.crewCostFcDays} days * ${toCurrency(form.crewCostFcDkkPerDay)} = ${toCurrency(crewFcCost)}`),
+      kvLine('FO:', `${form.crewCostFoDays} days * ${toCurrency(form.crewCostFoDkkPerDay)} = ${toCurrency(crewFoCost)}`),
+      kvLine('Cabin:', `${form.crewCostCabinDays} days * ${toCurrency(form.crewCostCabinDkkPerDay)} = ${toCurrency(crewCabinCost)}`),
+      kvLine(
+        'Cabin SD:',
+        `${form.crewCostCabinSdDays} days * ${toCurrency(form.crewCostCabinSdDkkPerDay)} = ${toCurrency(crewCabinSdCost)}`,
+      ),
+      kvLine('Total crew costs:', toCurrency(crewTotal)),
+      '',
+      'COST SUMMARY (DKK)',
+      kvLine('Operating:', toCurrency(acmiOperatingCost)),
+      kvLine('Crew:', toCurrency(crewTotal)),
+      kvLine('HOTAC:', toCurrency(acmiHotacDkk)),
+      kvLine('Crew per diem:', toCurrency(acmiCrewPerDiemDkk)),
+      kvLine('Add-ons total:', toCurrency(acmiAddOns)),
+      kvLine('Subtotal before margin:', toCurrency(acmiBreakdown.baseCostDkk)),
+      kvLine(`Margin (${form.acmiSafetyMarginPercent.toFixed(0)}%):`, toCurrency(acmiBreakdown.marginDkk)),
+      kvLine('TOTAL:', toCurrency(acmiBreakdown.totalCostDkk)),
+      '',
+      'PRICE',
+      kvLine('Total EUR:', toEur(form.eurToDkkRate > 0 ? acmiBreakdown.totalCostDkk / form.eurToDkkRate : 0)),
+      kvLine('Min BLH DKK:', toCurrency(acmiBreakdown.minimumBlhDkk)),
+      kvLine('Min BLH EUR:', toEur(acmiBreakdown.minimumBlhEur)),
+      kvLine('Total BLH:', acmiBreakdown.totalBlh.toFixed(2)),
+      '',
+      'CALCULATION TRACE',
+      ...acmiBreakdown.details.map((line) => `- ${line}`),
+      '',
+      'Fields marked with [] can be completed manually if missing.',
+    ])
+  }
+
+  function composeAcmiCustomerEmail() {
+    if (!acmiBreakdown) return
+    const aircraft = form.acmiAircraft || selectedOriginalType
+    const flightNumbers = form.acmiLines
+      .filter((line) => line.enabled && line.flightNumber.trim().length > 0)
+      .map((line) => line.flightNumber.trim())
+    const flightRef = flightNumbers.length > 0 ? flightNumbers.join('/') : '[FLTNO]'
+    const dateRef = formatSubjectDate(form.navblueFlightDate)
+    const subject = `ACMI Offer ${flightRef} ${dateRef}`
+    const routingRows = buildModuleRoutingRows(form.acmiLines, 'ACMI')
+    openEmailDraft(subject, [
+      'Hello,',
+      '',
+      'Please find the ACMI proposal below.',
+      '',
+      kvLine('Flight date:', withFallback(form.navblueFlightDate, 'Flight date')),
+      kvLine('Aircraft type:', aircraft),
+      '',
+      'ROUTING',
+      ...(routingRows.length === 0
+        ? ['No active legs yet']
+        : routingRows.map(
+            (row, idx) =>
+              `${idx + 1}) ${row.flightNumber}  ${row.from}-${row.to}  STD ${row.std}  STA ${row.sta}  BLH ${row.blh}`,
+          )),
+      '',
+      'PRICE',
+      kvLine('Total DKK:', toCurrency(acmiBreakdown.totalCostDkk)),
+      kvLine('Total EUR:', toEur(form.eurToDkkRate > 0 ? acmiBreakdown.totalCostDkk / form.eurToDkkRate : 0)),
+      '',
+      'Fields marked with [] can be completed manually if missing.',
+    ])
+  }
+
+  function composeAdhocInternalEmail() {
+    if (!adhocBreakdown) return
+    const aircraft = form.adhocAircraft || selectedOriginalType
+    const flightNumbers = form.adhocLines
+      .filter((line) => line.enabled && line.flightNumber.trim().length > 0)
+      .map((line) => line.flightNumber.trim())
+    const flightRef = flightNumbers.length > 0 ? flightNumbers.join('/') : '[FLTNO]'
+    const dateRef = formatSubjectDate(form.navblueFlightDate)
+    const subject = `Adhoc Offer ${flightRef} ${dateRef}`
+    const crewFcCost = form.crewCostFcDays * form.crewCostFcDkkPerDay
+    const crewFoCost = form.crewCostFoDays * form.crewCostFoDkkPerDay
+    const crewCabinCost = form.crewCostCabinDays * form.crewCostCabinDkkPerDay
+    const crewCabinSdCost = form.crewCostCabinSdDays * form.crewCostCabinSdDkkPerDay
+    const crewTotal = crewFcCost + crewFoCost + crewCabinCost + crewCabinSdCost
+    const adhocAircraft = (form.adhocAircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+    const adhocOperatingCost = enabledAdhocLines.reduce((sum, line) => {
+      const blh = derivePositioningBlh(line) || ownBlhDefaults[adhocAircraft]
+      return sum + blh * ownDocPerBlhByAircraft[adhocAircraft]
+    }, 0)
+    const adhocAddOns =
+      (form.ownIncludeScaExtraHotac ? (typeof form.ownScaExtraHotacDkk === 'number' ? form.ownScaExtraHotacDkk : 0) : 0) +
+      (form.ownIncludeScaExtraCrewPerDiem
+        ? (typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0) * form.eurToDkkRate
+        : 0)
+    const adhocHotacDkk = form.ownIncludeScaExtraHotac ? (typeof form.ownScaExtraHotacDkk === 'number' ? form.ownScaExtraHotacDkk : 0) : 0
+    const adhocCrewPerDiemDkk = form.ownIncludeScaExtraCrewPerDiem
+      ? (typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0) * form.eurToDkkRate
+      : 0
+    const routingRows = buildModuleRoutingRows(form.adhocLines, 'Adhoc')
+    openEmailDraft(subject, [
+      'Hello,',
+      '',
+      'ADHOC OFFER - PRICE DETAILS',
+      kvLine('Flight date:', withFallback(form.navblueFlightDate, 'Flight date')),
+      kvLine('Aircraft type:', aircraft),
+      kvLine('EUR/DKK rate:', form.eurToDkkRate.toFixed(2)),
+      '',
+      'ROUTING',
+      ...(routingRows.length === 0
+        ? ['No active legs yet']
+        : routingRows.map(
+            (row, idx) =>
+              `${idx + 1}) ${row.flightNumber}  ${row.from}-${row.to}  STD ${row.std}  STA ${row.sta}  BLH ${row.blh}`,
+          )),
+      '',
+      'SCA CREW COSTS (DKK)',
+      kvLine('FC:', `${form.crewCostFcDays} days * ${toCurrency(form.crewCostFcDkkPerDay)} = ${toCurrency(crewFcCost)}`),
+      kvLine('FO:', `${form.crewCostFoDays} days * ${toCurrency(form.crewCostFoDkkPerDay)} = ${toCurrency(crewFoCost)}`),
+      kvLine('Cabin:', `${form.crewCostCabinDays} days * ${toCurrency(form.crewCostCabinDkkPerDay)} = ${toCurrency(crewCabinCost)}`),
+      kvLine(
+        'Cabin SD:',
+        `${form.crewCostCabinSdDays} days * ${toCurrency(form.crewCostCabinSdDkkPerDay)} = ${toCurrency(crewCabinSdCost)}`,
+      ),
+      kvLine('Total crew costs:', toCurrency(crewTotal)),
+      '',
+      'COST SUMMARY (DKK)',
+      kvLine('Operating:', toCurrency(adhocOperatingCost)),
+      kvLine('Crew:', toCurrency(crewTotal)),
+      kvLine('HOTAC:', toCurrency(adhocHotacDkk)),
+      kvLine('Crew per diem:', toCurrency(adhocCrewPerDiemDkk)),
+      kvLine('Add-ons total:', toCurrency(adhocAddOns)),
+      kvLine('Subtotal before margin:', toCurrency(adhocBreakdown.totalCostDkk)),
+      kvLine(`Margin (${form.adhocSafetyMarginPercent.toFixed(0)}%):`, toCurrency(adhocBreakdown.marginDkk)),
+      kvLine('TOTAL:', toCurrency(adhocBreakdown.minimumTotalDkk)),
+      '',
+      'PRICE',
+      kvLine('Total EUR:', toEur(adhocBreakdown.minimumTotalEur)),
+      kvLine('Min BLH DKK:', toCurrency(adhocBreakdown.minimumBlhDkk)),
+      kvLine('Min BLH EUR:', toEur(adhocBreakdown.minimumBlhEur)),
+      kvLine('Total BLH:', adhocBreakdown.totalBlh.toFixed(2)),
+      '',
+      'CALCULATION TRACE',
+      ...adhocBreakdown.details.map((line) => `- ${line}`),
+      '',
+      'Fields marked with [] can be completed manually if missing.',
+    ])
+  }
+
+  function composeAdhocCustomerEmail() {
+    if (!adhocBreakdown) return
+    const aircraft = form.adhocAircraft || selectedOriginalType
+    const flightNumbers = form.adhocLines
+      .filter((line) => line.enabled && line.flightNumber.trim().length > 0)
+      .map((line) => line.flightNumber.trim())
+    const flightRef = flightNumbers.length > 0 ? flightNumbers.join('/') : '[FLTNO]'
+    const dateRef = formatSubjectDate(form.navblueFlightDate)
+    const subject = `Adhoc Offer ${flightRef} ${dateRef}`
+    const routingRows = buildModuleRoutingRows(form.adhocLines, 'Adhoc')
+    openEmailDraft(subject, [
+      'Hello,',
+      '',
+      'Please find the Adhoc proposal below.',
+      '',
+      kvLine('Flight date:', withFallback(form.navblueFlightDate, 'Flight date')),
+      kvLine('Aircraft type:', aircraft),
+      '',
+      'ROUTING',
+      ...(routingRows.length === 0
+        ? ['No active legs yet']
+        : routingRows.map(
+            (row, idx) =>
+              `${idx + 1}) ${row.flightNumber}  ${row.from}-${row.to}  STD ${row.std}  STA ${row.sta}  BLH ${row.blh}`,
+          )),
+      '',
+      'PRICE',
+      kvLine('Total DKK:', toCurrency(adhocBreakdown.minimumTotalDkk)),
+      kvLine('Total EUR:', toEur(adhocBreakdown.minimumTotalEur)),
+      '',
+      'Fields marked with [] can be completed manually if missing.',
+    ])
+  }
+
+  function composeMainToolEmail() {
+    if (!form.originalType || results.length === 0 || activeLegs.length === 0) return
+    const dateRef = formatSubjectDate(form.navblueFlightDate)
+    const subject = `IRREG Main Tool Options ${dateRef}`
+    const routeRows = activeLegs.map((leg, idx) => {
+      const key = (['leg1', 'leg2', 'leg3', 'leg4'] as const)[idx]
+      const resolved = deriveMainRouteBlh(leg, routeCityPairBlhByLeg[key])
+      const blh = resolved.hours && resolved.hours > 0 ? formatBlhFromHours(resolved.hours) : '[BLH]'
+      const pax = Number.isFinite(leg.pax) ? String(leg.pax) : 'NA'
+      return [`Leg ${idx + 1}`, withFallback(leg.from, 'From'), withFallback(leg.to, 'To'), withFallback(leg.depUtc, 'STD'), withFallback(leg.arrUtc, 'STA'), blh, pax]
+    })
+    const routeTable = buildAsciiTable(['Leg', 'From', 'To', 'STD', 'STA', 'BLH', 'Pax'], routeRows)
+    const optionOverview = results.map(
+      (result, idx) =>
+        `${idx + 1}. ${result.name} | Delta ${toSignedDkkDelta(result.evaluatedTotalDkk)} | Capacity ${result.seatCapacity} | Overflow ${result.overflowPax}`,
+    )
+    const optionDetails = results.flatMap((result) => [
+      '',
+      `${result.name}`,
+      `- Difference from original: ${toSignedDkkDelta(result.evaluatedTotalDkk)}`,
+      `- EU261 (EUR): ${toEur(result.eu261CostEur)}`,
+      `- Overnight (EUR): ${toEur(result.overnightCostEur)}`,
+      `- Overflow cost: ${toCurrency(result.overflowCost)}`,
+      `- Crew cost: ${toCurrency(result.crewCost)}`,
+      '- Cost details:',
+      ...result.details.map((line) => `  - ${line}`),
+    ])
+
+    openEmailDraft(subject, [
+      'Hello,',
+      '',
+      'Main tool scenario setup and option comparison.',
+      '',
+      `Flight date: ${withFallback(form.navblueFlightDate, 'Flight date')}`,
+      `Original aircraft: ${form.originalType}`,
+      `EUR/DKK rate: ${form.eurToDkkRate.toFixed(2)}`,
+      '',
+      'Route / BLH / Pax (table):',
+      ...routeTable,
+      '',
+      'Enabled option inputs:',
+      `- Own SCA flights: ${form.enableOwnScaFlights ? 'Yes' : 'No'} (A321 ${form.ownAvailableA321}, A321N ${form.ownAvailableA321N}, A339 ${form.ownAvailableA339})`,
+      `- Subcharter Option 1: ${form.enableSubOption1 ? 'Yes' : 'No'}`,
+      `- Subcharter Option 2: ${form.enableSubOption2 ? 'Yes' : 'No'}`,
+      `- Subcharter Option 3: ${form.enableSubOption3 ? 'Yes' : 'No'}`,
+      '',
+      'RESULT OVERVIEW',
+      ...optionOverview,
+      '',
+      'DETAILED RESULT SUGGESTIONS',
+      ...optionDetails,
+      '',
+      'Fields marked with [] can be completed manually if missing.',
+    ])
+  }
+
+  useEffect(() => {
+    if (isToolMode || !form.originalType || results.length === 0 || routeLegsWithStations.length === 0) return
+    const routeSignature = routeLegsWithStations
+      .map(({ key, leg }) => `${leg.from}-${leg.to}-${leg.depUtc}-${leg.arrUtc}-${routeLegHoursByKey[key] ?? 0}`)
+      .join('|')
+    const resultSignature = results
+      .slice(0, 5)
+      .map((result) => `${result.id}:${Math.round(result.evaluatedTotalDkk)}:${result.overflowPax}`)
+      .join('|')
+    const signature = `main:${form.originalType}:${routeSignature}:${resultSignature}`
+    const topOptions = results.slice(0, 3).map((result) => `${result.name}: ${toSignedDkkDelta(result.evaluatedTotalDkk)}`)
+    pushScenarioHistory('main', signature, 'Main Tool', [
+      `Original type: ${form.originalType}`,
+      `Route legs: ${routeLegsWithStations.length}`,
+      `Best option: ${results[0].name} (${toSignedDkkDelta(results[0].evaluatedTotalDkk)})`,
+      ...topOptions,
+    ])
+  }, [form.originalType, isToolMode, results, routeLegHoursByKey, routeLegsWithStations])
+
+  useEffect(() => {
+    if (!form.enableAcmiModule || !acmiBreakdown) return
+    const routing = buildModuleRoutingOverview(form.acmiLines, 'ACMI')
+    const signature = `acmi:${form.acmiAircraft || selectedOriginalType}:${form.acmiSafetyMarginPercent}:${routing.join('|')}:${Math.round(acmiBreakdown.totalCostDkk)}`
+    pushScenarioHistory('acmi', signature, 'ACMI Tool', [
+      `Aircraft: ${form.acmiAircraft || selectedOriginalType}`,
+      `Total BLH: ${acmiBreakdown.totalBlh.toFixed(2)}`,
+      `Total price: ${toCurrency(acmiBreakdown.totalCostDkk)} / ${toEur(form.eurToDkkRate > 0 ? acmiBreakdown.totalCostDkk / form.eurToDkkRate : 0)}`,
+      `Margin: ${toCurrency(acmiBreakdown.marginDkk)} (${form.acmiSafetyMarginPercent.toFixed(0)}%)`,
+      ...routing,
+    ])
+  }, [acmiBreakdown, form.acmiAircraft, form.acmiLines, form.acmiSafetyMarginPercent, form.enableAcmiModule, form.eurToDkkRate, selectedOriginalType])
+
+  useEffect(() => {
+    if (!form.enableAdhocModule || !adhocBreakdown) return
+    const routing = buildModuleRoutingOverview(form.adhocLines, 'Adhoc')
+    const signature = `adhoc:${form.adhocAircraft || selectedOriginalType}:${form.adhocSafetyMarginPercent}:${routing.join('|')}:${Math.round(adhocBreakdown.minimumTotalDkk)}`
+    pushScenarioHistory('adhoc', signature, 'Adhoc Tool', [
+      `Aircraft: ${form.adhocAircraft || selectedOriginalType}`,
+      `Total BLH: ${adhocBreakdown.totalBlh.toFixed(2)}`,
+      `Total price: ${toCurrency(adhocBreakdown.minimumTotalDkk)} / ${toEur(adhocBreakdown.minimumTotalEur)}`,
+      `Margin: ${toCurrency(adhocBreakdown.marginDkk)} (${form.adhocSafetyMarginPercent.toFixed(0)}%)`,
+      ...routing,
+    ])
+  }, [
+    adhocBreakdown,
+    form.adhocAircraft,
+    form.adhocLines,
+    form.adhocSafetyMarginPercent,
+    form.enableAdhocModule,
     selectedOriginalType,
   ])
 
@@ -2677,7 +3127,7 @@ function App() {
             <p className="eu261-note">
               CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
             </p>
-            <p className="eu261-note">No fallback BLH is used. Fill From+To, or STD+STA, or BLH HH:MM.</p>
+            <p className="eu261-note">Fill From+To, or STD+STA, or BLH HH:MM.</p>
             <div className="route-grid">
               <div className="route-row">
                 <span>Leg 1</span>
@@ -3019,7 +3469,7 @@ function App() {
           <p className="eu261-note">
             CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
           </p>
-          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked. No fallback BLH is used.</p>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
           <div className="route-grid four-lines">
             {form.ownBaseLines.map((line, idx) => (
               <div className="route-row with-controls" key={`own-${idx}`}>
@@ -3106,7 +3556,7 @@ function App() {
                         ? 'Insert manually'
                         : 'BLH HH:MM'
                   }
-                  disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
+                  disabled={!line.enabled || hasTimedBlh(line.leg)}
                 />
                 <button type="button" onClick={() => resetOwnBaseLine(idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
                   Reset
@@ -3124,7 +3574,7 @@ function App() {
           <p className="eu261-note">
             CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
           </p>
-          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked. No fallback BLH is used.</p>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
           <div className="grid compact">
             <label>
               BLH cost (EUR)
@@ -3226,7 +3676,7 @@ function App() {
                         ? 'Insert manually'
                         : 'BLH HH:MM'
                   }
-                  disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
+                  disabled={!line.enabled || hasTimedBlh(line.leg)}
                 />
                 <button type="button" onClick={() => resetSubBaseLine('sub1', idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
                   Reset
@@ -3276,7 +3726,7 @@ function App() {
           <p className="eu261-note">
             CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
           </p>
-          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked. No fallback BLH is used.</p>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
           <div className="grid compact">
             <label>
               BLH cost (EUR)
@@ -3378,7 +3828,7 @@ function App() {
                         ? 'Insert manually'
                         : 'BLH HH:MM'
                   }
-                  disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
+                  disabled={!line.enabled || hasTimedBlh(line.leg)}
                 />
                 <button type="button" onClick={() => resetSubBaseLine('sub2', idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
                   Reset
@@ -3428,7 +3878,7 @@ function App() {
           <p className="eu261-note">
             CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
           </p>
-          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked. No fallback BLH is used.</p>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
           <div className="grid compact">
             <label>
               BLH cost (EUR)
@@ -3530,7 +3980,7 @@ function App() {
                         ? 'Insert manually'
                         : 'BLH HH:MM'
                   }
-                  disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
+                  disabled={!line.enabled || hasTimedBlh(line.leg)}
                 />
                 <button type="button" onClick={() => resetSubBaseLine('sub3', idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
                   Reset
@@ -3609,6 +4059,12 @@ function App() {
                     Active
                   </label>
                   <input
+                    value={line.flightNumber}
+                    onChange={(event) => updateAcmiLine(idx, { flightNumber: event.target.value })}
+                    placeholder="Flight no"
+                    disabled={!line.enabled}
+                  />
+                  <input
                     value={line.leg.from}
                     onChange={(event) => updateAcmiLine(idx, { leg: { from: event.target.value, blh: '' } })}
                     placeholder="From"
@@ -3618,11 +4074,14 @@ function App() {
                     value={line.leg.to}
                     onBlur={async () => {
                       if (!line.enabled || line.manualBlhOverride) return
+                      const from = normalizeStation(line.leg.from)
+                      const to = normalizeStation(line.leg.to)
+                      if (!from || !to) return
                       const loadingKey = `acmi-${idx}`
                       setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: true }))
                       setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
                       try {
-                        const blh = await fetchOcdcCityPairBlh(line.leg.from, line.leg.to)
+                        const blh = await fetchOcdcCityPairBlh(from, to)
                         if (blh) {
                           updateAcmiLine(idx, { leg: { blh } })
                           setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
@@ -3661,7 +4120,7 @@ function App() {
                           ? 'Insert manually'
                           : 'BLH HH:MM'
                     }
-                    disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
+                    disabled={!line.enabled || hasTimedBlh(line.leg)}
                   />
                   <button
                     type="button"
@@ -3688,9 +4147,19 @@ function App() {
             {acmiBreakdown ? (
               <div className="acmi-summary">
                 <p>Total ACMI BLH: {acmiBreakdown.totalBlh.toFixed(2)}</p>
+                <p>ACMI cost before margin: {toCurrency(acmiBreakdown.baseCostDkk)}</p>
+                <p>ACMI margin amount: {toCurrency(acmiBreakdown.marginDkk)}</p>
                 <p>Total ACMI cost: {toCurrency(acmiBreakdown.totalCostDkk)}</p>
                 <p>Minimum ACMI BLH (DKK): {toCurrency(acmiBreakdown.minimumBlhDkk)}</p>
                 <p>Minimum ACMI BLH (EUR): {toEur(acmiBreakdown.minimumBlhEur)}</p>
+                <div className="module-email-actions">
+                  <button type="button" onClick={composeAcmiInternalEmail}>
+                    Email price details
+                  </button>
+                  <button type="button" onClick={composeAcmiCustomerEmail}>
+                    Email Offer to Client
+                  </button>
+                </div>
                 <details className="acmi-breakdown-details">
                   <summary>Show ACMI calculation setup</summary>
                   <ul>
@@ -3770,6 +4239,12 @@ function App() {
                     Active
                   </label>
                   <input
+                    value={line.flightNumber}
+                    onChange={(event) => updateAdhocLine(idx, { flightNumber: event.target.value })}
+                    placeholder="Flight no"
+                    disabled={!line.enabled}
+                  />
+                  <input
                     value={line.leg.from}
                     onChange={(event) => updateAdhocLine(idx, { leg: { from: event.target.value, blh: '' } })}
                     placeholder="From"
@@ -3779,11 +4254,14 @@ function App() {
                     value={line.leg.to}
                     onBlur={async () => {
                       if (!line.enabled || line.manualBlhOverride) return
+                      const from = normalizeStation(line.leg.from)
+                      const to = normalizeStation(line.leg.to)
+                      if (!from || !to) return
                       const loadingKey = `adhoc-${idx}`
                       setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: true }))
                       setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
                       try {
-                        const blh = await fetchOcdcCityPairBlh(line.leg.from, line.leg.to)
+                        const blh = await fetchOcdcCityPairBlh(from, to)
                         if (blh) {
                           updateAdhocLine(idx, { leg: { blh } })
                           setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
@@ -3822,7 +4300,7 @@ function App() {
                           ? 'Insert manually'
                           : 'BLH HH:MM'
                     }
-                    disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
+                    disabled={!line.enabled || hasTimedBlh(line.leg)}
                   />
                   <button
                     type="button"
@@ -3850,10 +4328,19 @@ function App() {
               <div className="acmi-summary">
                 <p>Total Adhoc BLH: {adhocBreakdown.totalBlh.toFixed(2)}</p>
                 <p>Adhoc cost before margin (all expenses): {toCurrency(adhocBreakdown.totalCostDkk)}</p>
+                <p>Adhoc margin amount: {toCurrency(adhocBreakdown.marginDkk)}</p>
                 <p>Minimum Adhoc total price (DKK): {toCurrency(adhocBreakdown.minimumTotalDkk)}</p>
                 <p>Minimum Adhoc total price (EUR): {toEur(adhocBreakdown.minimumTotalEur)}</p>
                 <p>Minimum Adhoc BLH (DKK): {toCurrency(adhocBreakdown.minimumBlhDkk)}</p>
                 <p>Minimum Adhoc BLH (EUR): {toEur(adhocBreakdown.minimumBlhEur)}</p>
+                <div className="module-email-actions">
+                  <button type="button" onClick={composeAdhocInternalEmail}>
+                    Email price details
+                  </button>
+                  <button type="button" onClick={composeAdhocCustomerEmail}>
+                    Email Offer to Client
+                  </button>
+                </div>
                 <details className="acmi-breakdown-details">
                   <summary>Show Adhoc calculation setup</summary>
                   <ul>
@@ -4084,6 +4571,11 @@ function App() {
           <p className="result-placeholder">No scenarios available for the currently enabled options.</p>
         ) : (
           <>
+            <div className="module-email-actions" style={{ marginBottom: 10 }}>
+              <button type="button" onClick={composeMainToolEmail}>
+                Email fra main tool
+              </button>
+            </div>
             {cheapest ? (
               <div className="cheapest">
                 Lowest difference from original (DKK, {cheapest.eu261IncludedInEvaluation ? 'incl. EU261' : 'excl. EU261'}):{' '}
@@ -4277,6 +4769,8 @@ function App() {
                 <div className="audit-block">
                   <h3>ACMI Audit</h3>
                   <p>Total BLH: {acmiBreakdown.totalBlh.toFixed(2)}</p>
+                  <p>Base cost before margin: {toCurrency(acmiBreakdown.baseCostDkk)}</p>
+                  <p>Margin amount: {toCurrency(acmiBreakdown.marginDkk)}</p>
                   <p>Total cost: {toCurrency(acmiBreakdown.totalCostDkk)}</p>
                   <p>Minimum BLH (DKK): {toCurrency(acmiBreakdown.minimumBlhDkk)}</p>
                   <p>Minimum BLH (EUR): {toEur(acmiBreakdown.minimumBlhEur)}</p>
@@ -4292,6 +4786,7 @@ function App() {
                   <h3>Adhoc Audit</h3>
                   <p>Total BLH: {adhocBreakdown.totalBlh.toFixed(2)}</p>
                   <p>Total cost before margin: {toCurrency(adhocBreakdown.totalCostDkk)}</p>
+                  <p>Margin amount: {toCurrency(adhocBreakdown.marginDkk)}</p>
                   <p>Minimum total (DKK): {toCurrency(adhocBreakdown.minimumTotalDkk)}</p>
                   <p>Minimum total (EUR): {toEur(adhocBreakdown.minimumTotalEur)}</p>
                   <ul>
@@ -4303,6 +4798,32 @@ function App() {
               ) : null}
             </div>
           )}
+          <details className="audit-history-details">
+            <summary>Historik - tidligere scenarier ({scenarioHistory.length})</summary>
+            {scenarioHistory.length === 0 ? (
+              <p className="result-placeholder">Ingen historik endnu. Beregn et scenarie for at gemme et historikpunkt.</p>
+            ) : (
+              <>
+                <div className="audit-history-list">
+                  {scenarioHistory.map((entry) => (
+                    <div key={entry.id} className="audit-history-item">
+                      <p>
+                        <strong>{entry.title}</strong> ({entry.mode.toUpperCase()}) - {entry.createdAt}
+                      </p>
+                      <ul>
+                        {entry.summaryLines.map((line) => (
+                          <li key={`${entry.id}-${line}`}>{line}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+                <button type="button" onClick={() => setScenarioHistory([])}>
+                  Clear historik
+                </button>
+              </>
+            )}
+          </details>
         </details>
       </section>
       ) : null}

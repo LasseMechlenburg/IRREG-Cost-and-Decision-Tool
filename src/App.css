@@ -273,7 +273,7 @@ header p {
 }
 
 .route-row.with-controls.module-row {
-  grid-template-columns: 62px 70px 72px 72px 28px 72px 72px 28px 156px 70px;
+  grid-template-columns: 62px 70px 94px 72px 72px 28px 72px 72px 28px 156px 70px;
   gap: 6px;
 }
 
@@ -374,6 +374,40 @@ header p {
 .acmi-breakdown-details ul {
   margin: 8px 0 0;
   padding-left: 18px;
+}
+
+.module-email-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.module-email-actions button {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+
+.audit-history-details {
+  margin-top: 10px;
+}
+
+.audit-history-list {
+  margin-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.audit-history-item {
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  padding: 8px;
+  background: #ffffff;
+}
+
+.audit-history-item p {
+  margin: 0;
 }
 
 .settings-box h4 {
