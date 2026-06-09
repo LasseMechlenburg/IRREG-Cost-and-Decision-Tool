@@ -64,6 +64,45 @@ header p {
   min-width: 130px;
 }
 
+.admin-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.28);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+
+.admin-modal-card {
+  width: min(420px, calc(100vw - 32px));
+  background: #ffffff;
+  border: 1px solid #dbe3ee;
+  border-radius: 12px;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.admin-modal-card h4 {
+  margin: 0;
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.admin-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.citypair-inline-error {
+  grid-column: 4 / -1;
+  color: #b91c1c;
+  font-size: 11px;
+  margin-top: -2px;
+}
+
 .top-rate-label {
   display: flex;
   flex-direction: column;
@@ -208,18 +247,33 @@ header p {
 
 .route-row {
   display: grid;
-  grid-template-columns: 70px repeat(5, minmax(90px, 1fr));
+  grid-template-columns:
+    50px
+    minmax(88px, 118px)
+    minmax(88px, 118px)
+    24px
+    minmax(88px, 118px)
+    minmax(88px, 118px)
+    24px
+    minmax(126px, 156px)
+    minmax(58px, 76px)
+    minmax(70px, 1fr);
   gap: 8px;
   align-items: center;
 }
 
 .route-row.with-controls {
-  grid-template-columns: 62px 70px 110px 86px repeat(4, 72px) 28px 138px 70px;
+  grid-template-columns: 62px 70px 110px 86px 72px 72px 28px 72px 72px 28px 156px 70px;
   gap: 6px;
 }
 
 .route-row.with-controls.sub-row {
-  grid-template-columns: 62px 70px 110px repeat(4, 72px) 28px 138px 70px;
+  grid-template-columns: 62px 70px 110px 72px 72px 28px 72px 72px 28px 156px 70px;
+  gap: 6px;
+}
+
+.route-row.with-controls.module-row {
+  grid-template-columns: 62px 70px 72px 72px 28px 72px 72px 28px 156px 70px;
   gap: 6px;
 }
 

@@ -19,12 +19,14 @@ type RouteLegInput = {
   arrUtc: string
   to: string
   pax: number | '' | 'NA'
+  blh: string
 }
 
 type OwnBaseLineInput = {
   enabled: boolean
   applyToAllResults: boolean
   manualBlh: string
+  manualBlhOverride: boolean
   aircraft: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
   leg: RouteLegInput
 }
@@ -33,6 +35,7 @@ type SubBaseLineInput = {
   enabled: boolean
   applyToAllResults: boolean
   manualBlh: string
+  manualBlhOverride: boolean
   leg: RouteLegInput
 }
 
@@ -54,6 +57,8 @@ type FormState = {
   ownBaseLines: OwnBaseLineInput[]
   acmiLines: OwnBaseLineInput[]
   adhocLines: OwnBaseLineInput[]
+  acmiAircraft: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+  adhocAircraft: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
   acmiSafetyMarginPercent: number
   adhocSafetyMarginPercent: number
   subCharter1Lines: SubBaseLineInput[]
@@ -148,7 +153,7 @@ type BlhLine = {
   from: string
   to: string
   blh: number
-  source: 'excel' | 'time' | 'fallback'
+  source: 'excel' | 'time' | 'city_pair' | 'city_pair_loading' | 'blh'
 }
 
 type CostBreakdown = {
@@ -177,6 +182,7 @@ type EnabledSubCharterLine = {
   enabled: boolean
   applyToAllResults: boolean
   manualBlh: string
+  manualBlhOverride: boolean
   leg: RouteLegInput
   charter: 1 | 2 | 3
   subType: 'SUB Narrowbody' | 'SUB Widebody'
@@ -243,8 +249,10 @@ const DOC_COMPONENT_LABELS: Record<keyof NonNullable<AircraftRouteData['docCompo
 const BASELINE_AIRCRAFT_OPTIONS: BaselineAircraftKey[] = ['A321', 'A321N', 'A339', 'SUB Narrowbody', 'SUB Widebody']
 const NAVBLUE_USERNAME = import.meta.env.VITE_NAVBLUE_USERNAME?.trim() ?? ''
 const NAVBLUE_PASSWORD = import.meta.env.VITE_NAVBLUE_PASSWORD?.trim() ?? ''
-const OCDC_BASE_URL = (import.meta.env.VITE_OCDC_BASE_URL?.trim() ?? '').replace(/\/+$/, '')
+const OCDC_API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || '/ocdc-api'
+const OCDC_BASE_URL = (import.meta.env.VITE_OCDC_BASE_URL?.trim() ?? OCDC_API_BASE_URL).replace(/\/+$/, '')
 const OCDC_API_KEY = import.meta.env.VITE_OCDC_API_KEY?.trim() ?? ''
+const ADMIN_TOOLS_PASSWORD = import.meta.env.VITE_ADMIN_TOOLS_PASSWORD?.trim() || 'Sunclass'
 
 function sumComponentsPerBlh(components: Record<BaselineComponentKey, number>): number {
   return DOC_COMPONENT_KEYS.reduce((sum, key) => sum + (components[key] ?? 0), 0)
@@ -383,19 +391,25 @@ const DEFAULT_SEATS_BY_AIRCRAFT = OWN_AIRCRAFT.reduce<
 )
 
 function emptyLeg(): RouteLegInput {
-  return { from: '', depUtc: '', arrUtc: '', to: '', pax: '' }
+  return { from: '', depUtc: '', arrUtc: '', to: '', pax: '', blh: '' }
 }
 
 function emptyOwnBaseLine(): OwnBaseLineInput {
-  return { enabled: false, applyToAllResults: false, manualBlh: '', aircraft: '', leg: emptyLeg() }
+  return { enabled: false, applyToAllResults: false, manualBlh: '', manualBlhOverride: false, aircraft: '', leg: emptyLeg() }
 }
 
 function emptySubBaseLine(): SubBaseLineInput {
-  return { enabled: false, applyToAllResults: false, manualBlh: '', leg: emptyLeg() }
+  return { enabled: false, applyToAllResults: false, manualBlh: '', manualBlhOverride: false, leg: emptyLeg() }
 }
 
 function normalizeBlhInput(input: string): string {
-  return input.replace(/[^0-9:]/g, '').slice(0, 5)
+  const cleaned = input.replace(/[^0-9:]/g, '')
+  if (!cleaned.includes(':') && /^\d{3,4}$/.test(cleaned)) {
+    const hourDigits = cleaned.length === 4 ? cleaned.slice(0, 2) : cleaned.slice(0, 1)
+    const minuteDigits = cleaned.slice(-2)
+    return `${hourDigits.padStart(2, '0')}:${minuteDigits}`
+  }
+  return cleaned.slice(0, 5)
 }
 
 function parseBlhHours(input: string): number | null {
@@ -426,6 +440,53 @@ function hasTimedBlh(leg: RouteLegInput): boolean {
 
 function hasStationsAndTimes(leg: RouteLegInput): boolean {
   return hasStations(leg) && hasTimedBlh(leg)
+}
+
+function derivePositioningBlh(line: {
+  manualBlh: string
+  manualBlhOverride?: boolean
+  leg: RouteLegInput
+}): number {
+  const manual = parseBlhHours(line.manualBlh)
+  const timed = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)
+  if (line.manualBlhOverride && manual !== null) return manual
+  if (timed !== null) return timed
+  if (manual !== null) return manual
+  return 0
+}
+
+function deriveMainRouteBlh(leg: RouteLegInput, cityPairBlh: string): { hours: number | null; source: 'time' | 'city_pair' | 'blh' } {
+  const timeBlh = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc)
+  if (timeBlh && timeBlh > 0) return { hours: timeBlh, source: 'time' }
+  const cityPair = parseBlhHours(cityPairBlh)
+  if (cityPair && cityPair > 0) return { hours: cityPair, source: 'city_pair' }
+  const manual = parseBlhHours(leg.blh)
+  if (manual && manual > 0) return { hours: manual, source: 'blh' }
+  return { hours: null, source: 'time' }
+}
+
+function getLegHoursNoFallback(leg: RouteLegInput, cityPairBlh: string): number {
+  const resolved = deriveMainRouteBlh(leg, cityPairBlh)
+  return resolved.hours && resolved.hours > 0 ? resolved.hours : 0
+}
+
+async function fetchOcdcCityPairBlh(origin: string, destination: string): Promise<string | null> {
+  const from = normalizeStation(origin)
+  const to = normalizeStation(destination)
+  if (from.length !== 3 || to.length !== 3) return null
+  const url =
+    `${OCDC_API_BASE_URL.replace(/\/$/, '')}/api/v1/flights/block-time?origin=${encodeURIComponent(from)}` +
+    `&destination=${encodeURIComponent(to)}&method=median`
+  const headers: Record<string, string> = {}
+  if (OCDC_API_KEY) headers['X-API-Key'] = OCDC_API_KEY
+  const response = await fetch(url, { headers })
+  if (!response.ok) return null
+  const payload = (await response.json()) as { data?: { estimateMinutesRounded?: number } }
+  const minutes = Number(payload?.data?.estimateMinutesRounded ?? 0)
+  if (!Number.isFinite(minutes) || minutes <= 0) return null
+  const whole = Math.floor(minutes / 60)
+  const mins = Math.round(minutes % 60)
+  return `${String(whole).padStart(2, '0')}:${String(mins).padStart(2, '0')}`
 }
 
 function getIataSeasonForDate(inputDate: string): 'S' | 'W' {
@@ -467,8 +528,8 @@ function normalizeFlightNumber(input: string): string {
 }
 
 function parseRaidoBookedPax(booked: Record<string, unknown>): { pax: number; infants: number } | null {
-  const adultsRaw = Number(booked.Adults)
-  const childrenRaw = Number(booked.Children)
+  const adultsRaw = Number(booked.Adults ?? booked.Adult ?? booked.ADU)
+  const childrenRaw = Number(booked.Children ?? booked.Child ?? booked.CHD)
   const hasBookedPax = Number.isFinite(adultsRaw) || Number.isFinite(childrenRaw)
   if (!hasBookedPax) {
     return null
@@ -476,7 +537,7 @@ function parseRaidoBookedPax(booked: Record<string, unknown>): { pax: number; in
 
   const adults = Number.isFinite(adultsRaw) ? adultsRaw : 0
   const children = Number.isFinite(childrenRaw) ? childrenRaw : 0
-  const infants = Number(booked.Infants ?? 0) || 0
+  const infants = Number(booked.Infants ?? booked.Infant ?? booked.INF ?? 0) || 0
   return { pax: adults + children, infants }
 }
 
@@ -526,6 +587,7 @@ function normalizeLegInput(input: RouteLegInput): RouteLegInput {
     arrUtc: normalizeUtcInput(input.arrUtc),
     to: normalizeStation(input.to),
     pax: typeof input.pax === 'number' ? input.pax : input.pax === 'NA' ? 'NA' : '',
+    blh: normalizeBlhInput(input.blh ?? ''),
   }
 }
 
@@ -648,6 +710,8 @@ const INITIAL_FORM: FormState = {
   ownBaseLines: [emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine()],
   acmiLines: [emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine()],
   adhocLines: [emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine()],
+  acmiAircraft: '',
+  adhocAircraft: '',
   acmiSafetyMarginPercent: 0,
   adhocSafetyMarginPercent: 0,
   subCharter1Lines: [emptySubBaseLine(), emptySubBaseLine()],
@@ -697,6 +761,22 @@ const INITIAL_FORM: FormState = {
 function App() {
   const [form, setForm] = useState<FormState>(INITIAL_FORM)
   const [eu261ByScenario, setEu261ByScenario] = useState<Record<string, ScenarioEu261Selection>>({})
+  const [cityPairLoadingByLine, setCityPairLoadingByLine] = useState<Record<string, boolean>>({})
+  const [cityPairFailedByLine, setCityPairFailedByLine] = useState<Record<string, boolean>>({})
+  const [adminPromptTarget, setAdminPromptTarget] = useState<null | 'acmi' | 'adhoc' | 'baseline'>(null)
+  const [adminPasswordInput, setAdminPasswordInput] = useState('')
+  const [routeCityPairLoadingByLeg, setRouteCityPairLoadingByLeg] = useState<Record<'leg1' | 'leg2' | 'leg3' | 'leg4', boolean>>({
+    leg1: false,
+    leg2: false,
+    leg3: false,
+    leg4: false,
+  })
+  const [routeCityPairBlhByLeg, setRouteCityPairBlhByLeg] = useState<Record<'leg1' | 'leg2' | 'leg3' | 'leg4', string>>({
+    leg1: '',
+    leg2: '',
+    leg3: '',
+    leg4: '',
+  })
   const [showBaselinePanel, setShowBaselinePanel] = useState(false)
   const [selectedBaselineAircraft, setSelectedBaselineAircraft] = useState<BaselineAircraftKey>('A321')
   const isToolMode = form.enableAcmiModule || form.enableAdhocModule
@@ -808,6 +888,13 @@ function App() {
   )
   const scenarioOptions = form.originalType ? SCENARIOS[form.originalType] : []
   const selectedOriginalType: OriginalType = form.originalType || 'A321'
+  const routeLegEntries: Array<{ key: 'leg1' | 'leg2' | 'leg3' | 'leg4'; leg: RouteLegInput }> = [
+    { key: 'leg1', leg: normalizeLegInput(form.leg1) },
+    { key: 'leg2', leg: normalizeLegInput(form.leg2) },
+    { key: 'leg3', leg: normalizeLegInput(form.leg3) },
+    { key: 'leg4', leg: normalizeLegInput(form.leg4) },
+  ]
+  const routeLegsWithStations = routeLegEntries.filter(({ leg }) => hasStations(leg))
 
   useEffect(() => {
     setEu261ByScenario({})
@@ -822,6 +909,21 @@ function App() {
         pax: typeof leg.pax === 'number' ? leg.pax : 0,
       }))
   }, [form.leg1, form.leg2, form.leg3, form.leg4])
+
+  const routeLegHoursByKey = useMemo(() => {
+    const legKeys: Array<'leg1' | 'leg2' | 'leg3' | 'leg4'> = ['leg1', 'leg2', 'leg3', 'leg4']
+    const result: Record<'leg1' | 'leg2' | 'leg3' | 'leg4', number | null> = {
+      leg1: null,
+      leg2: null,
+      leg3: null,
+      leg4: null,
+    }
+    legKeys.forEach((key) => {
+      const leg = normalizeLegInput(form[key])
+      result[key] = deriveMainRouteBlh(leg, routeCityPairBlhByLeg[key]).hours
+    })
+    return result
+  }, [form.leg1, form.leg2, form.leg3, form.leg4, routeCityPairBlhByLeg])
 
   useEffect(() => {
     const inferredBand = (() => {
@@ -868,11 +970,11 @@ function App() {
     [normalizedOwnLines],
   )
   const enabledAcmiLines = useMemo(
-    () => normalizedAcmiLines.filter((line) => line.enabled && hasStations(line.leg)),
+    () => normalizedAcmiLines.filter((line) => line.enabled && hasPositioningBlhInput(line)),
     [normalizedAcmiLines],
   )
   const enabledAdhocLines = useMemo(
-    () => normalizedAdhocLines.filter((line) => line.enabled && hasStations(line.leg)),
+    () => normalizedAdhocLines.filter((line) => line.enabled && hasPositioningBlhInput(line)),
     [normalizedAdhocLines],
   )
   const enabledSubLines = useMemo(
@@ -957,17 +1059,27 @@ function App() {
       return []
     }
 
-    return activeLegs.map((leg, idx) => {
-      const timeBlh = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc)
+    const normalizedLegs: Array<{ key: 'leg1' | 'leg2' | 'leg3' | 'leg4'; leg: RouteLegInput }> = [
+      { key: 'leg1', leg: normalizeLegInput(form.leg1) },
+      { key: 'leg2', leg: normalizeLegInput(form.leg2) },
+      { key: 'leg3', leg: normalizeLegInput(form.leg3) },
+      { key: 'leg4', leg: normalizeLegInput(form.leg4) },
+    ]
 
-      if (timeBlh && timeBlh > 0) {
-        return { label: `Leg ${idx + 1}`, from: leg.from, to: leg.to, blh: timeBlh, source: 'time' }
+    return normalizedLegs.filter(({ leg }) => hasStations(leg)).map(({ key, leg }, idx) => {
+      if (routeCityPairLoadingByLeg[key]) {
+        return { label: `Leg ${idx + 1}`, from: leg.from, to: leg.to, blh: 0, source: 'city_pair_loading' as const }
       }
-
-      const fallback = ownBlhDefaults[selectedOriginalType]
-      return { label: `Leg ${idx + 1}`, from: leg.from, to: leg.to, blh: fallback, source: 'fallback' }
+      const resolved = deriveMainRouteBlh(leg, routeCityPairBlhByLeg[key])
+      return {
+        label: `Leg ${idx + 1}`,
+        from: leg.from,
+        to: leg.to,
+        blh: resolved.hours && resolved.hours > 0 ? resolved.hours : 0,
+        source: resolved.source,
+      }
     })
-  }, [activeLegs, form.originalType, ownBlhDefaults, selectedOriginalType])
+  }, [form.leg1, form.leg2, form.leg3, form.leg4, form.originalType, routeCityPairBlhByLeg, routeCityPairLoadingByLeg])
 
   const results = useMemo<CostBreakdown[]>(() => {
     if (!form.originalType) {
@@ -980,10 +1092,8 @@ function App() {
     const ownScaExtraCrewPerDiemEur =
       typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0
     const originalDocPerBlh = ownDocPerBlhByAircraft[selectedOriginalType]
-    const originalMainBlhTotal = activeLegs.reduce((sum, leg) => {
-      const timeBlh = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc)
-      if (timeBlh && timeBlh > 0) return sum + timeBlh
-      return sum + ownBlhDefaults[selectedOriginalType]
+    const originalMainBlhTotal = routeLegsWithStations.reduce((sum, { key, leg }) => {
+      return sum + getLegHoursNoFallback(leg, routeCityPairBlhByLeg[key])
     }, 0)
 
     return availableScenarioOptions
@@ -1116,8 +1226,6 @@ function App() {
             aircraft === 'SUB Narrowbody' && currentSubTypeLegIndex >= 0
               ? option.forcedSubNarrowbodyOptions?.[currentSubTypeLegIndex]
               : undefined
-          const subFallbackBlh = aircraft === 'SUB Widebody' ? baselineByAircraft['SUB Widebody'].blh : baselineByAircraft['SUB Narrowbody'].blh
-          const fallbackBlh = isSub ? subFallbackBlh : (fallbackDefaults?.blh ?? 0)
           const effectiveNarrowOption: 1 | 2 =
             subLine?.charter === 2 ? 2 : forcedOptionByLeg ?? (option.forcedSubNarrowbodyOption === 2 ? 2 : 1)
           const subSeats =
@@ -1145,17 +1253,11 @@ function App() {
           })
           eu261LegOptions.push({ index, label: eu261LegLabel, checked: includeEu261ForLeg })
 
-          const legBlhTotal = activeLegs.reduce((sum, leg) => {
-            const timeBlh = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc)
-            if (timeBlh && timeBlh > 0) {
-              return sum + timeBlh
-            }
-            return sum + fallbackBlh
+          const legBlhTotal = routeLegsWithStations.reduce((sum, { key }) => {
+            return sum + (routeLegHoursByKey[key] ?? 0)
           }, 0)
 
-          let positioningBlhOneWay = line
-            ? ((parseBlhHours(line.manualBlh) ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)) ?? 0)
-            : 0
+          let positioningBlhOneWay = line ? derivePositioningBlh(line) : 0
           if (currentSubType && currentSubTypeLegIndex === 0) {
             const extraPositioningBlh = (() => {
               const extraLines =
@@ -1165,11 +1267,7 @@ function App() {
                     ].slice(subScenarioLegCountByType[currentSubType])
                   : subWideLines.slice(subScenarioLegCountByType[currentSubType])
               return extraLines.reduce(
-                (sum, extraLine) =>
-                  sum +
-                  ((parseBlhHours(extraLine.manualBlh) ??
-                    durationHoursFromUtcTimes(extraLine.leg.depUtc, extraLine.leg.arrUtc)) ??
-                    0),
+                (sum, extraLine) => sum + derivePositioningBlh(extraLine),
                 0,
               )
             })()
@@ -1179,11 +1277,7 @@ function App() {
             const extraOwnPositioningBlh = ownLinesByAircraft[ownAircraft]
               .slice(ownScenarioLegCountByAircraft[ownAircraft])
               .reduce(
-                (sum, extraLine) =>
-                  sum +
-                  ((parseBlhHours(extraLine.manualBlh) ??
-                    durationHoursFromUtcTimes(extraLine.leg.depUtc, extraLine.leg.arrUtc)) ??
-                    0),
+                (sum, extraLine) => sum + derivePositioningBlh(extraLine),
                 0,
               )
             positioningBlhOneWay += extraOwnPositioningBlh
@@ -1203,9 +1297,8 @@ function App() {
                   : sub1BlhCostEur
             const subRate = form.eurToDkkRate
             const charterCostDkk = totalBlh * subBlhCostEur * subRate
-            const subNonMaintDocCostDkk = activeLegs.reduce((sum, leg) => {
-              const timeBlh = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc)
-              const legHours = timeBlh && timeBlh > 0 ? timeBlh : fallbackBlh
+            const subNonMaintDocCostDkk = routeLegsWithStations.reduce((sum, { key }) => {
+              const legHours = routeLegHoursByKey[key] ?? 0
               const nonMaintPerBlh = subNonMaintDocPerBlh[aircraft]
               return sum + legHours * nonMaintPerBlh
             }, 0)
@@ -1254,7 +1347,7 @@ function App() {
         ;(['A321', 'A321N', 'A339'] as const).forEach((aircraft) => {
           if (ownScenarioHasType[aircraft]) return
           ownGlobalLinesByAircraft[aircraft].forEach((line) => {
-            const blh = (parseBlhHours(line.manualBlh) ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)) ?? 0
+            const blh = derivePositioningBlh(line)
             if (blh <= 0) return
             const lineCost = blh * 2 * ownDocPerBlhByAircraft[aircraft]
             operatingCost += lineCost
@@ -1277,7 +1370,7 @@ function App() {
         ;([1, 2, 3] as const).forEach((opt) => {
           if (subScenarioUsesOption[opt]) return
           subGlobalLinesByOption[opt].forEach((line) => {
-            const blh = (parseBlhHours(line.manualBlh) ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)) ?? 0
+            const blh = derivePositioningBlh(line)
             if (blh <= 0) return
             const subType = opt === 3 ? 'SUB Widebody' : 'SUB Narrowbody'
             const subBlhCostEur = opt === 3 ? sub3BlhCostEur : opt === 2 ? sub2BlhCostEur : sub1BlhCostEur
@@ -1292,7 +1385,7 @@ function App() {
         if (subLegCount > 0) {
           ;(['A321', 'A321N', 'A339'] as const).forEach((aircraft) => {
             ownGlobalLinesByAircraft[aircraft].forEach((line) => {
-              const blh = (parseBlhHours(line.manualBlh) ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)) ?? 0
+              const blh = derivePositioningBlh(line)
               if (blh <= 0) return
               const lineCost = blh * 2 * ownDocPerBlhByAircraft[aircraft]
               operatingCost += lineCost
@@ -1306,7 +1399,7 @@ function App() {
         if (hasOwnAircraftLeg && subLegCount === 0) {
           ;([1, 2, 3] as const).forEach((opt) => {
             subGlobalLinesByOption[opt].forEach((line) => {
-              const blh = (parseBlhHours(line.manualBlh) ?? durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)) ?? 0
+              const blh = derivePositioningBlh(line)
               if (blh <= 0) return
               const subType = opt === 3 ? 'SUB Widebody' : 'SUB Narrowbody'
               const subBlhCostEur = opt === 3 ? sub3BlhCostEur : opt === 2 ? sub2BlhCostEur : sub1BlhCostEur
@@ -1406,9 +1499,8 @@ function App() {
         const ownershipAndFixedCostDkk = option.legs.reduce((sum, leg) => {
           if (leg === 'SUB Narrowbody' || leg === 'SUB Widebody') return sum
           const params = baselineByAircraft[leg]
-          const legBlh = activeLegs.reduce((blhSum, routeLeg) => {
-            const timeBlh = durationHoursFromUtcTimes(routeLeg.depUtc, routeLeg.arrUtc)
-            return blhSum + (timeBlh && timeBlh > 0 ? timeBlh : ownBlhDefaults[leg])
+          const legBlh = routeLegsWithStations.reduce((blhSum, { key }) => {
+            return blhSum + (routeLegHoursByKey[key] ?? 0)
           }, 0)
           return sum + legBlh * params.ownershipCostPerBlh + legBlh * params.maintenanceFixedPerBlh
         }, 0)
@@ -1554,6 +1646,9 @@ function App() {
       .sort((a, b) => a.evaluatedTotalDkk - b.evaluatedTotalDkk)
   }, [
     activeLegs,
+    routeLegsWithStations,
+    routeLegHoursByKey,
+    routeCityPairBlhByLeg,
     enabledOwnLines,
     enabledSubLines,
     eu261ByScenario,
@@ -1575,7 +1670,37 @@ function App() {
     setForm((prev) => ({ ...prev, [key]: value }))
   }
 
+  function requestAdminAccess(target: 'acmi' | 'adhoc' | 'baseline') {
+    setAdminPromptTarget(target)
+    setAdminPasswordInput('')
+  }
+
+  function submitAdminAccess() {
+    if (adminPasswordInput !== ADMIN_TOOLS_PASSWORD) {
+      window.alert('Wrong password')
+      return
+    }
+    const target = adminPromptTarget
+    setAdminPromptTarget(null)
+    setAdminPasswordInput('')
+    if (target === 'acmi') {
+      setForm((prev) => ({ ...prev, enableAcmiModule: true, enableAdhocModule: false }))
+      return
+    }
+    if (target === 'adhoc') {
+      setForm((prev) => ({ ...prev, enableAdhocModule: true, enableAcmiModule: false }))
+      return
+    }
+    if (target === 'baseline') {
+      setShowBaselinePanel(true)
+    }
+  }
+
   function toggleAcmiTool() {
+    if (!form.enableAcmiModule) {
+      requestAdminAccess('acmi')
+      return
+    }
     setForm((prev) => {
       const enable = !prev.enableAcmiModule
       return {
@@ -1587,6 +1712,10 @@ function App() {
   }
 
   function toggleAdhocTool() {
+    if (!form.enableAdhocModule) {
+      requestAdminAccess('adhoc')
+      return
+    }
     setForm((prev) => {
       const enable = !prev.enableAdhocModule
       return {
@@ -1611,9 +1740,24 @@ function App() {
                 : value === ''
                   ? ''
                   : Number(value) || 0
+              : field === 'blh'
+                ? normalizeBlhInput(String(value))
               : normalizeUtcInput(String(value)),
       },
     }))
+  }
+
+  async function tryFetchRouteCityPairBlh(key: 'leg1' | 'leg2' | 'leg3' | 'leg4') {
+    const leg = normalizeLegInput(form[key])
+    if (!hasStations(leg)) return
+    setRouteCityPairLoadingByLeg((prev) => ({ ...prev, [key]: true }))
+    try {
+      const blh = await fetchOcdcCityPairBlh(leg.from, leg.to)
+      if (!blh) return
+      setRouteCityPairBlhByLeg((prev) => ({ ...prev, [key]: blh }))
+    } finally {
+      setRouteCityPairLoadingByLeg((prev) => ({ ...prev, [key]: false }))
+    }
   }
 
   function updateOwnBaseLine(
@@ -1622,6 +1766,7 @@ function App() {
       enabled?: boolean
       applyToAllResults?: boolean
       manualBlh?: string
+      manualBlhOverride?: boolean
       aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
       leg?: Partial<RouteLegInput>
     },
@@ -1634,6 +1779,14 @@ function App() {
       next[index] = {
         ...current,
         ...updates,
+        manualBlhOverride:
+          typeof updates.manualBlhOverride === 'boolean'
+            ? updates.manualBlhOverride
+            : typeof updates.manualBlh === 'string'
+              ? normalizeBlhInput(updates.manualBlh).length > 0
+              : updates.leg
+                ? false
+                : current.manualBlhOverride,
         manualBlh:
           typeof updates.manualBlh === 'string'
             ? normalizeBlhInput(updates.manualBlh)
@@ -1646,6 +1799,7 @@ function App() {
           arrUtc: normalizeUtcInput(nextLeg.arrUtc),
           to: normalizeStation(nextLeg.to),
           pax: typeof nextLeg.pax === 'number' ? nextLeg.pax : '',
+          blh: normalizeBlhInput(nextLeg.blh ?? ''),
         },
       }
 
@@ -1658,16 +1812,21 @@ function App() {
       const next = [...prev.acmiLines]
       const current = next[index]
       const nextLeg = updates.leg ? { ...current.leg, ...updates.leg } : current.leg
+      const normalizedBlh = normalizeBlhInput(nextLeg.blh ?? '')
+      const hasManualBlh = normalizedBlh.length > 0
 
       next[index] = {
         ...current,
         ...updates,
+        manualBlhOverride: hasManualBlh,
+        manualBlh: hasManualBlh ? normalizedBlh : formatBlhFromHours(durationHoursFromUtcTimes(nextLeg.depUtc, nextLeg.arrUtc)),
         leg: {
           from: normalizeStation(nextLeg.from),
           depUtc: normalizeUtcInput(nextLeg.depUtc),
           arrUtc: normalizeUtcInput(nextLeg.arrUtc),
           to: normalizeStation(nextLeg.to),
           pax: typeof nextLeg.pax === 'number' ? nextLeg.pax : '',
+          blh: normalizedBlh,
         },
       }
 
@@ -1680,16 +1839,21 @@ function App() {
       const next = [...prev.adhocLines]
       const current = next[index]
       const nextLeg = updates.leg ? { ...current.leg, ...updates.leg } : current.leg
+      const normalizedBlh = normalizeBlhInput(nextLeg.blh ?? '')
+      const hasManualBlh = normalizedBlh.length > 0
 
       next[index] = {
         ...current,
         ...updates,
+        manualBlhOverride: hasManualBlh,
+        manualBlh: hasManualBlh ? normalizedBlh : formatBlhFromHours(durationHoursFromUtcTimes(nextLeg.depUtc, nextLeg.arrUtc)),
         leg: {
           from: normalizeStation(nextLeg.from),
           depUtc: normalizeUtcInput(nextLeg.depUtc),
           arrUtc: normalizeUtcInput(nextLeg.arrUtc),
           to: normalizeStation(nextLeg.to),
           pax: typeof nextLeg.pax === 'number' ? nextLeg.pax : '',
+          blh: normalizedBlh,
         },
       }
 
@@ -1697,10 +1861,34 @@ function App() {
     })
   }
 
+  function resetAcmiLine(index: number) {
+    setCityPairFailedByLine((prev) => ({ ...prev, [`acmi-${index}`]: false }))
+    setForm((prev) => {
+      const next = [...prev.acmiLines]
+      next[index] = emptyOwnBaseLine()
+      return { ...prev, acmiLines: next }
+    })
+  }
+
+  function resetAdhocLine(index: number) {
+    setCityPairFailedByLine((prev) => ({ ...prev, [`adhoc-${index}`]: false }))
+    setForm((prev) => {
+      const next = [...prev.adhocLines]
+      next[index] = emptyOwnBaseLine()
+      return { ...prev, adhocLines: next }
+    })
+  }
+
   function updateSubBaseLine(
     type: 'sub1' | 'sub2' | 'sub3',
     index: number,
-    updates: { enabled?: boolean; applyToAllResults?: boolean; manualBlh?: string; leg?: Partial<RouteLegInput> },
+    updates: {
+      enabled?: boolean
+      applyToAllResults?: boolean
+      manualBlh?: string
+      manualBlhOverride?: boolean
+      leg?: Partial<RouteLegInput>
+    },
   ) {
     setForm((prev) => {
       const key = type === 'sub1' ? 'subCharter1Lines' : type === 'sub2' ? 'subCharter2Lines' : 'subCharter3Lines'
@@ -1711,6 +1899,14 @@ function App() {
       next[index] = {
         ...current,
         ...updates,
+        manualBlhOverride:
+          typeof updates.manualBlhOverride === 'boolean'
+            ? updates.manualBlhOverride
+            : typeof updates.manualBlh === 'string'
+              ? normalizeBlhInput(updates.manualBlh).length > 0
+              : updates.leg
+                ? false
+                : current.manualBlhOverride,
         manualBlh:
           typeof updates.manualBlh === 'string'
             ? normalizeBlhInput(updates.manualBlh)
@@ -1723,6 +1919,7 @@ function App() {
           arrUtc: normalizeUtcInput(nextLeg.arrUtc),
           to: normalizeStation(nextLeg.to),
           pax: typeof nextLeg.pax === 'number' ? nextLeg.pax : '',
+          blh: normalizeBlhInput(nextLeg.blh ?? ''),
         },
       }
 
@@ -1731,6 +1928,7 @@ function App() {
   }
 
   function resetOwnBaseLine(index: number) {
+    setCityPairFailedByLine((prev) => ({ ...prev, [`own-${index}`]: false }))
     setForm((prev) => {
       const next = [...prev.ownBaseLines]
       next[index] = emptyOwnBaseLine()
@@ -1739,6 +1937,7 @@ function App() {
   }
 
   function resetSubBaseLine(type: 'sub1' | 'sub2' | 'sub3', index: number) {
+    setCityPairFailedByLine((prev) => ({ ...prev, [`${type}-${index}`]: false }))
     setForm((prev) => {
       const key = type === 'sub1' ? 'subCharter1Lines' : type === 'sub2' ? 'subCharter2Lines' : 'subCharter3Lines'
       const next = [...prev[key]]
@@ -1790,6 +1989,7 @@ function App() {
   function resetAll() {
     setForm(INITIAL_FORM)
     setEu261ByScenario({})
+    setCityPairFailedByLine({})
   }
 
   const acmiBreakdown = useMemo<AcmiBreakdown | null>(() => {
@@ -1806,8 +2006,8 @@ function App() {
     const details: string[] = []
 
     lines.forEach((line, index) => {
-      const aircraft = (line.aircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
-      const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? ownBlhDefaults[aircraft]
+      const aircraft = (form.acmiAircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+      const blh = derivePositioningBlh(line) || ownBlhDefaults[aircraft]
       const docPerBlh = acmiDocPerBlhByAircraft[aircraft]
       const lineCost = blh * docPerBlh
       const excludedPerBlh = 0
@@ -1856,6 +2056,7 @@ function App() {
     ownBlhDefaults,
     enabledAcmiLines,
     form.acmiSafetyMarginPercent,
+    form.acmiAircraft,
     form.crewCostCabinDays,
     form.crewCostCabinDkkPerDay,
     form.crewCostCabinSdDays,
@@ -1887,8 +2088,8 @@ function App() {
     const details: string[] = []
 
     lines.forEach((line, index) => {
-      const aircraft = (line.aircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
-      const blh = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc) ?? ownBlhDefaults[aircraft]
+      const aircraft = (form.adhocAircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+      const blh = derivePositioningBlh(line) || ownBlhDefaults[aircraft]
       const docPerBlh = ownDocPerBlhByAircraft[aircraft]
       const lineCost = blh * docPerBlh
 
@@ -1933,6 +2134,7 @@ function App() {
     ownDocPerBlhByAircraft,
     enabledAdhocLines,
     form.adhocSafetyMarginPercent,
+    form.adhocAircraft,
     form.crewCostCabinDays,
     form.crewCostCabinDkkPerDay,
     form.crewCostCabinSdDays,
@@ -1967,10 +2169,7 @@ function App() {
     return baselineByAircraft[aircraft].componentsPerBlh
   }
 
-  function getAuditComponentSummary(
-    aircraft: AircraftType,
-    legs: Array<Pick<RouteLegInput, 'from' | 'to' | 'depUtc' | 'arrUtc'>>,
-  ): AuditComponentSummary {
+  function getAuditComponentSummary(aircraft: AircraftType): AuditComponentSummary {
     const componentTotals = DOC_COMPONENT_KEYS.reduce(
       (acc, key) => {
         acc[key] = 0
@@ -1983,7 +2182,7 @@ function App() {
     let docTotal = 0
     let fallbackLegCount = 0
 
-    legs.forEach((leg) => {
+    routeLegsWithStations.forEach(({ key }) => {
       const fallbackAircraft = getFallbackAircraftForAudit(aircraft)
       const fallbackBlh =
         aircraft === 'SUB Narrowbody'
@@ -1997,7 +2196,7 @@ function App() {
           : aircraft === 'SUB Widebody'
             ? sumComponentsPerBlh(baselineByAircraft['SUB Widebody'].componentsPerBlh)
             : ownDocPerBlhByAircraft[fallbackAircraft]
-      const blh = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc) ?? fallbackBlh
+      const blh = routeLegHoursByKey[key] ?? fallbackBlh
       const doc = blh * fallbackDocPerBlh
 
       blhTotal += blh
@@ -2053,6 +2252,10 @@ function App() {
                   className={showBaselinePanel ? 'tool-toggle-btn active' : 'tool-toggle-btn'}
                   onClick={(event) => {
                     event.currentTarget.blur()
+                    if (!showBaselinePanel) {
+                      requestAdminAccess('baseline')
+                      return
+                    }
                     setShowBaselinePanel((prev) => !prev)
                   }}
                 >
@@ -2075,6 +2278,34 @@ function App() {
             </button>
           </div>
         </div>
+        {adminPromptTarget ? (
+          <div className="admin-modal-backdrop">
+            <div className="admin-modal-card">
+              <h4>Admin password required</h4>
+              <input
+                type="password"
+                value={adminPasswordInput}
+                onChange={(event) => setAdminPasswordInput(event.target.value)}
+                placeholder="Enter admin password"
+                autoFocus
+              />
+              <div className="admin-modal-actions">
+                <button type="button" onClick={submitAdminAccess}>
+                  Confirm
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAdminPromptTarget(null)
+                    setAdminPasswordInput('')
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {showBaselinePanel ? (
           <div className="settings-box section-card">
@@ -2204,74 +2435,72 @@ function App() {
               <details>
                 <summary>How to use the main tool</summary>
                 <p>
-                  The main tool compares realistic recovery scenarios for one disrupted operation based on aircraft choice, route setup,
-                  capacity, positioning needs, and selected commercial assumptions.
+                  The main tool compares recovery scenarios for one disrupted operation based on route setup, available options, seat
+                  capacity, positioning impact, and selected commercial assumptions.
                 </p>
                 <ul>
                   <li>
-                    Set <strong>Original aircraft type</strong>, then enter the disrupted operation in <strong>Route (UTC)</strong> with
-                    From, STD, STA, To, and Pax per leg.
+                    Set <strong>Original aircraft type</strong>, then define each route leg with <strong>From + To OR STD + STA OR BLH</strong>.
+                    No hidden BLH fallback is used in route legs anymore.
                   </li>
                   <li>
-                    For each city pair, enter valid <strong>UTC times (STD/STA)</strong> to get relevant BLH calculations.
+                    BLH source priority in <strong>Route (UTC)</strong> is: <strong>1) STD/STA</strong>, <strong>2) CityPair</strong>,{' '}
+                    <strong>3) manual BLH</strong>. If none are valid, route BLH is treated as 0.
                   </li>
                   <li>
-                    The entered original route (including BLH and operating cost components) is used as the common baseline in all scenarios,
-                    and each result is shown as a difference versus that original baseline.
+                    CityPair lookup uses OCDC block-time data and fills BLH after you enter From/To. While it runs, you will see{' '}
+                    <strong>Loading...</strong> in BLH/source areas.
                   </li>
                   <li>
-                    Under <strong>Enabled options</strong>, choose which solution groups should be considered in the result list.
+                    Manual BLH accepts <strong>HH:MM</strong>. If you type <strong>0200</strong>, the tool auto-formats it to{' '}
+                    <strong>02:00</strong>. Seconds are not required; BLH is handled in minutes.
                   </li>
                   <li>
-                    In <strong>SCA extra positioning flights</strong>, add own-fleet positioning legs and set aircraft type per line. Use{' '}
-                    <strong>Add to all results</strong> when that positioning impact should also be reflected in other scenarios.
+                    The entered original route is the shared baseline for all scenarios. Results are shown as difference versus that same
+                    baseline.
                   </li>
                   <li>
-                    For each positioning line you can use either station+times or manual <strong>BLH HH:MM</strong>. If BLH is filled, station
-                    and time fields are locked. If station and valid STD/STA are filled, BLH is auto-derived.
+                    Under <strong>Enabled options</strong>, choose which solution groups are allowed in the result list (own aircraft and/or
+                    subcharter options).
                   </li>
                   <li>
-                    Use the per-line <strong>Reset</strong> button to clear a single positioning line quickly without resetting the whole tool.
+                    In <strong>SCA extra positioning flights</strong> and <strong>Subcharter positioning lines</strong>, use per-line{' '}
+                    <strong>From+To OR STD+STA OR BLH</strong>. Fields are locked automatically when one method is active.
                   </li>
                   <li>
-                    In <strong>Subcharter Option 1/2/3</strong>, enter BLH rate, seats, positioning legs, and optional add-ons such as HOTAC
-                    and crew per diem.
+                    <strong>Add to all results</strong> on a positioning line applies that positioning impact to other relevant scenarios
+                    without double-counting on its own matching scenario.
                   </li>
                   <li>
-                    Flight fetch fills route legs sequentially (Leg 1, Leg 2, Leg 3, Leg 4). The sequence resets when you click{' '}
-                    <strong>Reset all fields</strong>.
+                    Use per-line <strong>Reset</strong> to clear one positioning line. Use <strong>Reset all fields</strong> to reset the whole tool.
                   </li>
                   <li>
-                    You can add <strong>Crew cost</strong> for own-aircraft solutions by entering purchased days and daily rates per crew role.
-                    These settings allow you to model the operational impact of buying extra days.
+                    In <strong>Subcharter Option 1/2/3</strong>, set BLH rate, seats, positioning, and optional HOTAC/crew per diem add-ons.
                   </li>
                   <li>
-                    <strong>Overflow</strong> is automatic: if scenario seat capacity is below requested Pax, overflow is created per leg and
-                    valued with your <strong>Expected overflow cost per pax</strong>.
+                    NAVBLUE fetch fills route legs sequentially (Leg 1 to Leg 4) and can also set aircraft type and infants. If NAVBLUE Loads
+                    do not contain booked pax for a flight, pax is shown as <strong>NA</strong>.
                   </li>
                   <li>
-                    You can tune compensation exposure with <strong>Pax seeking compensation (%)</strong> and enable <strong>EU261</strong> per
-                    scenario leg directly in result cards.
+                    <strong>Overflow</strong> is automatic from seat capacity versus requested pax (per leg), valued with{' '}
+                    <strong>Expected overflow cost per pax</strong>.
+                  </li>
+                  <li>
+                    Tune compensation exposure with <strong>Pax seeking compensation (%)</strong>, and enable <strong>EU261</strong> per scenario
+                    leg in result cards.
                   </li>
                   <li>
                     You can model sub-solution quality impact with <strong>NPS detractor per pax on sub (DKK)</strong>.
                   </li>
                   <li>
-                    Result cards show difference versus original, capacity, overflow, and full trace in <strong>Cost details</strong>, making
-                    scenario comparison transparent.
-                  </li>
-                  <li>
-                    <strong>Best option</strong> highlights the lowest evaluated cost among currently enabled and valid scenarios.
+                    Result cards show difference versus original, capacity, overflow, and detailed traces in <strong>Cost details</strong>.{' '}
+                    <strong>Best option</strong> marks the currently lowest evaluated cost.
                   </li>
                 </ul>
                 <p>
-                  <strong>Example (full walkthrough):</strong> Choose original type <strong>A321N</strong>, enter Leg 1 ARN-PMI and Leg 2
-                  PMI-ARN with pax demand. Enable spare SCA aircraft and set one available <strong>A321</strong> and one <strong>A339</strong>.
-                  Add one active A321 positioning leg (for instance BLL-ARN) and mark <strong>Add to all results</strong> to test broader
-                  operational impact. Then enable Subcharter Option 1 and add one active positioning leg plus HOTAC/crew per diem if relevant.
-                  Finally, adjust <strong>Expected overflow cost per pax</strong>, <strong>Pax seeking compensation (%)</strong>, and{' '}
-                  <strong>NPS detractor per pax on sub</strong>. Compare result cards to see how ranking changes when overflow pressure,
-                  compensation exposure, and sub-penalty assumptions move.
+                  <strong>Example (quick workflow):</strong> Set original type, fill Leg 1 and Leg 2 with From/To and either CityPair, times,
+                  or BLH. Enable own/sub options and available aircraft counts, add needed positioning lines, then adjust overflow/EU261/NPS
+                  assumptions. Compare result cards and open Cost details to understand why one solution is cheaper than another.
                 </p>
               </details>
             </div>
@@ -2290,7 +2519,7 @@ function App() {
                 <input
                   value={form.navblueFlightNumber}
                   onChange={(event) => update('navblueFlightNumber', event.target.value.toUpperCase())}
-                  placeholder="DK1784"
+                  placeholder="eg. DK1784"
                 />
               </label>
               <label>
@@ -2381,7 +2610,12 @@ function App() {
                               ? 'A339'
                               : ''
                       const loads = (flightRecord.Loads as Record<string, unknown> | undefined) ?? {}
-                      const booked = (loads.BookedPassengerPerWeight as Record<string, unknown> | undefined) ?? {}
+                      const booked =
+                        (loads.BookedPassengerPerWeight as Record<string, unknown> | undefined) ??
+                        (loads.BookedPassenger as Record<string, unknown> | undefined) ??
+                        (loads.BookedPax as Record<string, unknown> | undefined) ??
+                        (loads.Passengers as Record<string, unknown> | undefined) ??
+                        {}
                       const raidoPax = parseRaidoBookedPax(booked)
                       const legKey = (() => {
                         const idx = Math.max(0, Math.min(3, form.navblueFetchLegIndex))
@@ -2440,13 +2674,52 @@ function App() {
             </div>
 
             <h3>Route (UTC)</h3>
+            <p className="eu261-note">
+              CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
+            </p>
+            <p className="eu261-note">No fallback BLH is used. Fill From+To, or STD+STA, or BLH HH:MM.</p>
             <div className="route-grid">
               <div className="route-row">
                 <span>Leg 1</span>
-                <input value={form.leg1.from} onChange={(event) => updateLeg('leg1', 'from', event.target.value)} placeholder="From" />
-                <input value={form.leg1.depUtc} onChange={(event) => updateLeg('leg1', 'depUtc', event.target.value)} placeholder="STD" />
-                <input value={form.leg1.arrUtc} onChange={(event) => updateLeg('leg1', 'arrUtc', event.target.value)} placeholder="STA" />
-                <input value={form.leg1.to} onChange={(event) => updateLeg('leg1', 'to', event.target.value)} placeholder="To" />
+                <input
+                  value={form.leg1.from}
+                  onChange={(event) => {
+                    updateLeg('leg1', 'from', event.target.value)
+                    setRouteCityPairBlhByLeg((prev) => ({ ...prev, leg1: '' }))
+                  }}
+                  placeholder="From"
+                  disabled={form.leg1.blh.trim().length > 0}
+                />
+                <input
+                  value={form.leg1.to}
+                  onBlur={() => void tryFetchRouteCityPairBlh('leg1')}
+                  onChange={(event) => {
+                    updateLeg('leg1', 'to', event.target.value)
+                    setRouteCityPairBlhByLeg((prev) => ({ ...prev, leg1: '' }))
+                  }}
+                  placeholder="To"
+                  disabled={form.leg1.blh.trim().length > 0}
+                />
+                <span>OR</span>
+                <input
+                  value={form.leg1.depUtc}
+                  onChange={(event) => updateLeg('leg1', 'depUtc', event.target.value)}
+                  placeholder="STD"
+                  disabled={form.leg1.blh.trim().length > 0 || routeCityPairBlhByLeg.leg1.trim().length > 0}
+                />
+                <input
+                  value={form.leg1.arrUtc}
+                  onChange={(event) => updateLeg('leg1', 'arrUtc', event.target.value)}
+                  placeholder="STA"
+                  disabled={form.leg1.blh.trim().length > 0 || routeCityPairBlhByLeg.leg1.trim().length > 0}
+                />
+                <span>OR</span>
+                <input
+                  value={form.leg1.blh}
+                  onChange={(event) => updateLeg('leg1', 'blh', event.target.value)}
+                  placeholder="BLH HH:MM"
+                  disabled={hasStationsAndTimes(form.leg1) || routeCityPairBlhByLeg.leg1.trim().length > 0}
+                />
                 <input
                   type="text"
                   inputMode="numeric"
@@ -2469,10 +2742,45 @@ function App() {
 
               <div className="route-row">
                 <span>Leg 2</span>
-                <input value={form.leg2.from} onChange={(event) => updateLeg('leg2', 'from', event.target.value)} placeholder="From" />
-                <input value={form.leg2.depUtc} onChange={(event) => updateLeg('leg2', 'depUtc', event.target.value)} placeholder="STD" />
-                <input value={form.leg2.arrUtc} onChange={(event) => updateLeg('leg2', 'arrUtc', event.target.value)} placeholder="STA" />
-                <input value={form.leg2.to} onChange={(event) => updateLeg('leg2', 'to', event.target.value)} placeholder="To" />
+                <input
+                  value={form.leg2.from}
+                  onChange={(event) => {
+                    updateLeg('leg2', 'from', event.target.value)
+                    setRouteCityPairBlhByLeg((prev) => ({ ...prev, leg2: '' }))
+                  }}
+                  placeholder="From"
+                  disabled={form.leg2.blh.trim().length > 0}
+                />
+                <input
+                  value={form.leg2.to}
+                  onBlur={() => void tryFetchRouteCityPairBlh('leg2')}
+                  onChange={(event) => {
+                    updateLeg('leg2', 'to', event.target.value)
+                    setRouteCityPairBlhByLeg((prev) => ({ ...prev, leg2: '' }))
+                  }}
+                  placeholder="To"
+                  disabled={form.leg2.blh.trim().length > 0}
+                />
+                <span>OR</span>
+                <input
+                  value={form.leg2.depUtc}
+                  onChange={(event) => updateLeg('leg2', 'depUtc', event.target.value)}
+                  placeholder="STD"
+                  disabled={form.leg2.blh.trim().length > 0 || routeCityPairBlhByLeg.leg2.trim().length > 0}
+                />
+                <input
+                  value={form.leg2.arrUtc}
+                  onChange={(event) => updateLeg('leg2', 'arrUtc', event.target.value)}
+                  placeholder="STA"
+                  disabled={form.leg2.blh.trim().length > 0 || routeCityPairBlhByLeg.leg2.trim().length > 0}
+                />
+                <span>OR</span>
+                <input
+                  value={form.leg2.blh}
+                  onChange={(event) => updateLeg('leg2', 'blh', event.target.value)}
+                  placeholder="BLH HH:MM"
+                  disabled={hasStationsAndTimes(form.leg2) || routeCityPairBlhByLeg.leg2.trim().length > 0}
+                />
                 <input
                   type="text"
                   inputMode="numeric"
@@ -2495,10 +2803,45 @@ function App() {
 
               <div className="route-row">
                 <span>Leg 3</span>
-                <input value={form.leg3.from} onChange={(event) => updateLeg('leg3', 'from', event.target.value)} placeholder="From" />
-                <input value={form.leg3.depUtc} onChange={(event) => updateLeg('leg3', 'depUtc', event.target.value)} placeholder="STD" />
-                <input value={form.leg3.arrUtc} onChange={(event) => updateLeg('leg3', 'arrUtc', event.target.value)} placeholder="STA" />
-                <input value={form.leg3.to} onChange={(event) => updateLeg('leg3', 'to', event.target.value)} placeholder="To" />
+                <input
+                  value={form.leg3.from}
+                  onChange={(event) => {
+                    updateLeg('leg3', 'from', event.target.value)
+                    setRouteCityPairBlhByLeg((prev) => ({ ...prev, leg3: '' }))
+                  }}
+                  placeholder="From"
+                  disabled={form.leg3.blh.trim().length > 0}
+                />
+                <input
+                  value={form.leg3.to}
+                  onBlur={() => void tryFetchRouteCityPairBlh('leg3')}
+                  onChange={(event) => {
+                    updateLeg('leg3', 'to', event.target.value)
+                    setRouteCityPairBlhByLeg((prev) => ({ ...prev, leg3: '' }))
+                  }}
+                  placeholder="To"
+                  disabled={form.leg3.blh.trim().length > 0}
+                />
+                <span>OR</span>
+                <input
+                  value={form.leg3.depUtc}
+                  onChange={(event) => updateLeg('leg3', 'depUtc', event.target.value)}
+                  placeholder="STD"
+                  disabled={form.leg3.blh.trim().length > 0 || routeCityPairBlhByLeg.leg3.trim().length > 0}
+                />
+                <input
+                  value={form.leg3.arrUtc}
+                  onChange={(event) => updateLeg('leg3', 'arrUtc', event.target.value)}
+                  placeholder="STA"
+                  disabled={form.leg3.blh.trim().length > 0 || routeCityPairBlhByLeg.leg3.trim().length > 0}
+                />
+                <span>OR</span>
+                <input
+                  value={form.leg3.blh}
+                  onChange={(event) => updateLeg('leg3', 'blh', event.target.value)}
+                  placeholder="BLH HH:MM"
+                  disabled={hasStationsAndTimes(form.leg3) || routeCityPairBlhByLeg.leg3.trim().length > 0}
+                />
                 <input
                   type="text"
                   inputMode="numeric"
@@ -2521,10 +2864,45 @@ function App() {
 
               <div className="route-row">
                 <span>Leg 4</span>
-                <input value={form.leg4.from} onChange={(event) => updateLeg('leg4', 'from', event.target.value)} placeholder="From" />
-                <input value={form.leg4.depUtc} onChange={(event) => updateLeg('leg4', 'depUtc', event.target.value)} placeholder="STD" />
-                <input value={form.leg4.arrUtc} onChange={(event) => updateLeg('leg4', 'arrUtc', event.target.value)} placeholder="STA" />
-                <input value={form.leg4.to} onChange={(event) => updateLeg('leg4', 'to', event.target.value)} placeholder="To" />
+                <input
+                  value={form.leg4.from}
+                  onChange={(event) => {
+                    updateLeg('leg4', 'from', event.target.value)
+                    setRouteCityPairBlhByLeg((prev) => ({ ...prev, leg4: '' }))
+                  }}
+                  placeholder="From"
+                  disabled={form.leg4.blh.trim().length > 0}
+                />
+                <input
+                  value={form.leg4.to}
+                  onBlur={() => void tryFetchRouteCityPairBlh('leg4')}
+                  onChange={(event) => {
+                    updateLeg('leg4', 'to', event.target.value)
+                    setRouteCityPairBlhByLeg((prev) => ({ ...prev, leg4: '' }))
+                  }}
+                  placeholder="To"
+                  disabled={form.leg4.blh.trim().length > 0}
+                />
+                <span>OR</span>
+                <input
+                  value={form.leg4.depUtc}
+                  onChange={(event) => updateLeg('leg4', 'depUtc', event.target.value)}
+                  placeholder="STD"
+                  disabled={form.leg4.blh.trim().length > 0 || routeCityPairBlhByLeg.leg4.trim().length > 0}
+                />
+                <input
+                  value={form.leg4.arrUtc}
+                  onChange={(event) => updateLeg('leg4', 'arrUtc', event.target.value)}
+                  placeholder="STA"
+                  disabled={form.leg4.blh.trim().length > 0 || routeCityPairBlhByLeg.leg4.trim().length > 0}
+                />
+                <span>OR</span>
+                <input
+                  value={form.leg4.blh}
+                  onChange={(event) => updateLeg('leg4', 'blh', event.target.value)}
+                  placeholder="BLH HH:MM"
+                  disabled={hasStationsAndTimes(form.leg4) || routeCityPairBlhByLeg.leg4.trim().length > 0}
+                />
                 <input
                   type="text"
                   inputMode="numeric"
@@ -2551,7 +2929,8 @@ function App() {
               {blhPreview.length === 0 ? <p>Select aircraft type and fill route to view BLH.</p> : null}
               {blhPreview.map((line) => (
                 <p key={`${line.label}-${line.from}-${line.to}`}>
-                  {line.label} {line.from}-{line.to}: {line.blh.toFixed(2)} ({line.source})
+                  {line.label} {line.from}-{line.to}:{' '}
+                  {line.source === 'city_pair_loading' ? 'Loading... (city_pair)' : `${line.blh.toFixed(2)} (${line.source})`}
                 </p>
               ))}
             </div>
@@ -2637,7 +3016,10 @@ function App() {
         {form.enableOwnScaFlights && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>SCA extra positioning flights</h3>
-          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
+          <p className="eu261-note">
+            CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
+          </p>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked. No fallback BLH is used.</p>
           <div className="route-grid four-lines">
             {form.ownBaseLines.map((line, idx) => (
               <div className="route-row with-controls" key={`own-${idx}`}>
@@ -2662,7 +3044,7 @@ function App() {
                 <select
                   value={line.aircraft}
                   onChange={(event) => updateOwnBaseLine(idx, { aircraft: event.target.value as OwnBaseLineInput['aircraft'] })}
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
+                  disabled={!line.enabled || line.manualBlhOverride}
                 >
                   <option value="">Select</option>
                   {OWN_AIRCRAFT_OPTIONS.map((aircraft) => (
@@ -2673,38 +3055,63 @@ function App() {
                 </select>
                 <input
                   value={line.leg.from}
-                  onChange={(event) => updateOwnBaseLine(idx, { leg: { from: event.target.value } })}
+                  onChange={(event) => updateOwnBaseLine(idx, { leg: { from: event.target.value }, manualBlhOverride: false })}
                   placeholder="From"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
-                />
-                <input
-                  value={line.leg.depUtc}
-                  onChange={(event) => updateOwnBaseLine(idx, { leg: { depUtc: event.target.value } })}
-                  placeholder="STD"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
-                />
-                <input
-                  value={line.leg.arrUtc}
-                  onChange={(event) => updateOwnBaseLine(idx, { leg: { arrUtc: event.target.value } })}
-                  placeholder="STA"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
+                  disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                 />
                 <input
                   value={line.leg.to}
-                  onChange={(event) => updateOwnBaseLine(idx, { leg: { to: event.target.value } })}
+                  onBlur={async () => {
+                    if (!line.enabled || line.manualBlhOverride) return
+                    const loadingKey = `own-${idx}`
+                    setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                    setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                    try {
+                      const blh = await fetchOcdcCityPairBlh(line.leg.from, line.leg.to)
+                      if (blh) {
+                        updateOwnBaseLine(idx, { manualBlh: blh, manualBlhOverride: false })
+                        setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                      } else {
+                        setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                      }
+                    } finally {
+                      setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                    }
+                  }}
+                  onChange={(event) => updateOwnBaseLine(idx, { leg: { to: event.target.value }, manualBlhOverride: false })}
                   placeholder="To"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
+                  disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                 />
                 <span>OR</span>
                 <input
-                  value={line.manualBlh}
-                  onChange={(event) => updateOwnBaseLine(idx, { manualBlh: event.target.value })}
-                  placeholder="BLH HH:MM"
-                  disabled={!line.enabled || hasStationsAndTimes(line.leg)}
+                  value={line.leg.depUtc}
+                  onChange={(event) => updateOwnBaseLine(idx, { leg: { depUtc: event.target.value }, manualBlhOverride: false })}
+                  placeholder="STD"
+                  disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                />
+                <input
+                  value={line.leg.arrUtc}
+                  onChange={(event) => updateOwnBaseLine(idx, { leg: { arrUtc: event.target.value }, manualBlhOverride: false })}
+                  placeholder="STA"
+                  disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                />
+                <span>OR</span>
+                <input
+                  value={cityPairLoadingByLine[`own-${idx}`] ? 'Loading...' : line.manualBlh}
+                  onChange={(event) => updateOwnBaseLine(idx, { manualBlh: event.target.value, manualBlhOverride: true })}
+                  placeholder={
+                    cityPairLoadingByLine[`own-${idx}`]
+                      ? 'Loading...'
+                      : cityPairFailedByLine[`own-${idx}`]
+                        ? 'Insert manually'
+                        : 'BLH HH:MM'
+                  }
+                  disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
                 />
                 <button type="button" onClick={() => resetOwnBaseLine(idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
                   Reset
                 </button>
+                {cityPairFailedByLine[`own-${idx}`] ? <span className="citypair-inline-error">CityPair not found. Insert manually.</span> : null}
               </div>
             ))}
           </div>
@@ -2714,7 +3121,10 @@ function App() {
         {form.enableSubOption1 && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>Subcharter Option 1 (Narrowbody)</h3>
-          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
+          <p className="eu261-note">
+            CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
+          </p>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked. No fallback BLH is used.</p>
           <div className="grid compact">
             <label>
               BLH cost (EUR)
@@ -2765,38 +3175,63 @@ function App() {
                 </label>
                 <input
                   value={line.leg.from}
-                  onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { from: event.target.value } })}
+                  onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { from: event.target.value }, manualBlhOverride: false })}
                   placeholder="From"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
-                />
-                <input
-                  value={line.leg.depUtc}
-                  onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { depUtc: event.target.value } })}
-                  placeholder="STD"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
-                />
-                <input
-                  value={line.leg.arrUtc}
-                  onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { arrUtc: event.target.value } })}
-                  placeholder="STA"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
+                  disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                 />
                 <input
                   value={line.leg.to}
-                  onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { to: event.target.value } })}
+                  onBlur={async () => {
+                    if (!line.enabled || line.manualBlhOverride) return
+                    const loadingKey = `sub1-${idx}`
+                    setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                    setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                    try {
+                      const blh = await fetchOcdcCityPairBlh(line.leg.from, line.leg.to)
+                      if (blh) {
+                        updateSubBaseLine('sub1', idx, { manualBlh: blh, manualBlhOverride: false })
+                        setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                      } else {
+                        setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                      }
+                    } finally {
+                      setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                    }
+                  }}
+                  onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { to: event.target.value }, manualBlhOverride: false })}
                   placeholder="To"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
+                  disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                 />
                 <span>OR</span>
                 <input
-                  value={line.manualBlh}
-                  onChange={(event) => updateSubBaseLine('sub1', idx, { manualBlh: event.target.value })}
-                  placeholder="BLH HH:MM"
-                  disabled={!line.enabled || hasStationsAndTimes(line.leg)}
+                  value={line.leg.depUtc}
+                  onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { depUtc: event.target.value }, manualBlhOverride: false })}
+                  placeholder="STD"
+                  disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                />
+                <input
+                  value={line.leg.arrUtc}
+                  onChange={(event) => updateSubBaseLine('sub1', idx, { leg: { arrUtc: event.target.value }, manualBlhOverride: false })}
+                  placeholder="STA"
+                  disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                />
+                <span>OR</span>
+                <input
+                  value={cityPairLoadingByLine[`sub1-${idx}`] ? 'Loading...' : line.manualBlh}
+                  onChange={(event) => updateSubBaseLine('sub1', idx, { manualBlh: event.target.value, manualBlhOverride: true })}
+                  placeholder={
+                    cityPairLoadingByLine[`sub1-${idx}`]
+                      ? 'Loading...'
+                      : cityPairFailedByLine[`sub1-${idx}`]
+                        ? 'Insert manually'
+                        : 'BLH HH:MM'
+                  }
+                  disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
                 />
                 <button type="button" onClick={() => resetSubBaseLine('sub1', idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
                   Reset
                 </button>
+                {cityPairFailedByLine[`sub1-${idx}`] ? <span className="citypair-inline-error">CityPair not found. Insert manually.</span> : null}
               </div>
             ))}
           </div>
@@ -2838,7 +3273,10 @@ function App() {
         {form.enableSubOption2 && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>Subcharter Option 2 (Narrowbody)</h3>
-          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
+          <p className="eu261-note">
+            CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
+          </p>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked. No fallback BLH is used.</p>
           <div className="grid compact">
             <label>
               BLH cost (EUR)
@@ -2889,38 +3327,63 @@ function App() {
                 </label>
                 <input
                   value={line.leg.from}
-                  onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { from: event.target.value } })}
+                  onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { from: event.target.value }, manualBlhOverride: false })}
                   placeholder="From"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
-                />
-                <input
-                  value={line.leg.depUtc}
-                  onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { depUtc: event.target.value } })}
-                  placeholder="STD"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
-                />
-                <input
-                  value={line.leg.arrUtc}
-                  onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { arrUtc: event.target.value } })}
-                  placeholder="STA"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
+                  disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                 />
                 <input
                   value={line.leg.to}
-                  onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { to: event.target.value } })}
+                  onBlur={async () => {
+                    if (!line.enabled || line.manualBlhOverride) return
+                    const loadingKey = `sub2-${idx}`
+                    setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                    setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                    try {
+                      const blh = await fetchOcdcCityPairBlh(line.leg.from, line.leg.to)
+                      if (blh) {
+                        updateSubBaseLine('sub2', idx, { manualBlh: blh, manualBlhOverride: false })
+                        setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                      } else {
+                        setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                      }
+                    } finally {
+                      setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                    }
+                  }}
+                  onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { to: event.target.value }, manualBlhOverride: false })}
                   placeholder="To"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
+                  disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                 />
                 <span>OR</span>
                 <input
-                  value={line.manualBlh}
-                  onChange={(event) => updateSubBaseLine('sub2', idx, { manualBlh: event.target.value })}
-                  placeholder="BLH HH:MM"
-                  disabled={!line.enabled || hasStationsAndTimes(line.leg)}
+                  value={line.leg.depUtc}
+                  onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { depUtc: event.target.value }, manualBlhOverride: false })}
+                  placeholder="STD"
+                  disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                />
+                <input
+                  value={line.leg.arrUtc}
+                  onChange={(event) => updateSubBaseLine('sub2', idx, { leg: { arrUtc: event.target.value }, manualBlhOverride: false })}
+                  placeholder="STA"
+                  disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                />
+                <span>OR</span>
+                <input
+                  value={cityPairLoadingByLine[`sub2-${idx}`] ? 'Loading...' : line.manualBlh}
+                  onChange={(event) => updateSubBaseLine('sub2', idx, { manualBlh: event.target.value, manualBlhOverride: true })}
+                  placeholder={
+                    cityPairLoadingByLine[`sub2-${idx}`]
+                      ? 'Loading...'
+                      : cityPairFailedByLine[`sub2-${idx}`]
+                        ? 'Insert manually'
+                        : 'BLH HH:MM'
+                  }
+                  disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
                 />
                 <button type="button" onClick={() => resetSubBaseLine('sub2', idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
                   Reset
                 </button>
+                {cityPairFailedByLine[`sub2-${idx}`] ? <span className="citypair-inline-error">CityPair not found. Insert manually.</span> : null}
               </div>
             ))}
           </div>
@@ -2962,7 +3425,10 @@ function App() {
         {form.enableSubOption3 && !isToolMode && !showBaselinePanel ? (
           <div className="settings-box section-card">
           <h3>Subcharter Option 3 (Widebody)</h3>
-          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked.</p>
+          <p className="eu261-note">
+            CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
+          </p>
+          <p className="eu261-note">BLH format: HH:MM (example 02:30). If BLH is filled, station/time fields are locked. No fallback BLH is used.</p>
           <div className="grid compact">
             <label>
               BLH cost (EUR)
@@ -3013,38 +3479,63 @@ function App() {
                 </label>
                 <input
                   value={line.leg.from}
-                  onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { from: event.target.value } })}
+                  onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { from: event.target.value }, manualBlhOverride: false })}
                   placeholder="From"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
-                />
-                <input
-                  value={line.leg.depUtc}
-                  onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { depUtc: event.target.value } })}
-                  placeholder="STD"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
-                />
-                <input
-                  value={line.leg.arrUtc}
-                  onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { arrUtc: event.target.value } })}
-                  placeholder="STA"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
+                  disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                 />
                 <input
                   value={line.leg.to}
-                  onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { to: event.target.value } })}
+                  onBlur={async () => {
+                    if (!line.enabled || line.manualBlhOverride) return
+                    const loadingKey = `sub3-${idx}`
+                    setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                    setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                    try {
+                      const blh = await fetchOcdcCityPairBlh(line.leg.from, line.leg.to)
+                      if (blh) {
+                        updateSubBaseLine('sub3', idx, { manualBlh: blh, manualBlhOverride: false })
+                        setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                      } else {
+                        setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                      }
+                    } finally {
+                      setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                    }
+                  }}
+                  onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { to: event.target.value }, manualBlhOverride: false })}
                   placeholder="To"
-                  disabled={!line.enabled || line.manualBlh.trim().length > 0}
+                  disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                 />
                 <span>OR</span>
                 <input
-                  value={line.manualBlh}
-                  onChange={(event) => updateSubBaseLine('sub3', idx, { manualBlh: event.target.value })}
-                  placeholder="BLH HH:MM"
-                  disabled={!line.enabled || hasStationsAndTimes(line.leg)}
+                  value={line.leg.depUtc}
+                  onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { depUtc: event.target.value }, manualBlhOverride: false })}
+                  placeholder="STD"
+                  disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                />
+                <input
+                  value={line.leg.arrUtc}
+                  onChange={(event) => updateSubBaseLine('sub3', idx, { leg: { arrUtc: event.target.value }, manualBlhOverride: false })}
+                  placeholder="STA"
+                  disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                />
+                <span>OR</span>
+                <input
+                  value={cityPairLoadingByLine[`sub3-${idx}`] ? 'Loading...' : line.manualBlh}
+                  onChange={(event) => updateSubBaseLine('sub3', idx, { manualBlh: event.target.value, manualBlhOverride: true })}
+                  placeholder={
+                    cityPairLoadingByLine[`sub3-${idx}`]
+                      ? 'Loading...'
+                      : cityPairFailedByLine[`sub3-${idx}`]
+                        ? 'Insert manually'
+                        : 'BLH HH:MM'
+                  }
+                  disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
                 />
                 <button type="button" onClick={() => resetSubBaseLine('sub3', idx)} disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}>
                   Reset
                 </button>
+                {cityPairFailedByLine[`sub3-${idx}`] ? <span className="citypair-inline-error">CityPair not found. Insert manually.</span> : null}
               </div>
             ))}
           </div>
@@ -3086,9 +3577,28 @@ function App() {
         {form.enableAcmiModule && !showBaselinePanel ? (
           <div className="tool-module-panel section-card">
             <h3>ACMI module</h3>
+            <p className="eu261-note">
+              CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
+            </p>
+            <div className="grid compact">
+              <label>
+                ACMI aircraft type (all lines)
+                <select
+                  value={form.acmiAircraft}
+                  onChange={(event) => update('acmiAircraft', event.target.value as FormState['acmiAircraft'])}
+                >
+                  <option value="">Select</option>
+                  {OWN_AIRCRAFT_OPTIONS.map((aircraft) => (
+                    <option key={`acmi-global-air-${aircraft}`} value={aircraft}>
+                      {aircraft}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <div className="route-grid four-lines">
               {form.acmiLines.map((line, idx) => (
-                <div className="route-row with-controls" key={`acmi-${idx}`}>
+                <div className="route-row with-controls module-row" key={`acmi-${idx}`}>
                   <span>ACMI #{idx + 1}</span>
                   <label className="mini-check">
                     <input
@@ -3098,38 +3608,69 @@ function App() {
                     />
                     Active
                   </label>
-                  <select
-                    value={line.aircraft}
-                    onChange={(event) => updateAcmiLine(idx, { aircraft: event.target.value as OwnBaseLineInput['aircraft'] })}
-                    disabled={!line.enabled}
-                  >
-                    <option value="">Select</option>
-                    {OWN_AIRCRAFT_OPTIONS.map((aircraft) => (
-                      <option key={`acmi-air-${idx}-${aircraft}`} value={aircraft}>
-                        {aircraft}
-                      </option>
-                    ))}
-                  </select>
                   <input
                     value={line.leg.from}
-                    onChange={(event) => updateAcmiLine(idx, { leg: { from: event.target.value } })}
+                    onChange={(event) => updateAcmiLine(idx, { leg: { from: event.target.value, blh: '' } })}
                     placeholder="From"
-                  />
-                  <input
-                    value={line.leg.depUtc}
-                    onChange={(event) => updateAcmiLine(idx, { leg: { depUtc: event.target.value } })}
-                    placeholder="STD"
-                  />
-                  <input
-                    value={line.leg.arrUtc}
-                    onChange={(event) => updateAcmiLine(idx, { leg: { arrUtc: event.target.value } })}
-                    placeholder="STA"
+                    disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                   />
                   <input
                     value={line.leg.to}
-                    onChange={(event) => updateAcmiLine(idx, { leg: { to: event.target.value } })}
+                    onBlur={async () => {
+                      if (!line.enabled || line.manualBlhOverride) return
+                      const loadingKey = `acmi-${idx}`
+                      setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                      setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                      try {
+                        const blh = await fetchOcdcCityPairBlh(line.leg.from, line.leg.to)
+                        if (blh) {
+                          updateAcmiLine(idx, { leg: { blh } })
+                          setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                        } else {
+                          setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                        }
+                      } finally {
+                        setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                      }
+                    }}
+                    onChange={(event) => updateAcmiLine(idx, { leg: { to: event.target.value, blh: '' } })}
                     placeholder="To"
+                    disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                   />
+                  <span>OR</span>
+                  <input
+                    value={line.leg.depUtc}
+                    onChange={(event) => updateAcmiLine(idx, { leg: { depUtc: event.target.value, blh: '' } })}
+                    placeholder="STD"
+                    disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                  />
+                  <input
+                    value={line.leg.arrUtc}
+                    onChange={(event) => updateAcmiLine(idx, { leg: { arrUtc: event.target.value, blh: '' } })}
+                    placeholder="STA"
+                    disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                  />
+                  <span>OR</span>
+                  <input
+                    value={cityPairLoadingByLine[`acmi-${idx}`] ? 'Loading...' : line.leg.blh}
+                    onChange={(event) => updateAcmiLine(idx, { leg: { blh: event.target.value } })}
+                    placeholder={
+                      cityPairLoadingByLine[`acmi-${idx}`]
+                        ? 'Loading...'
+                        : cityPairFailedByLine[`acmi-${idx}`]
+                          ? 'Insert manually'
+                          : 'BLH HH:MM'
+                    }
+                    disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => resetAcmiLine(idx)}
+                    disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}
+                  >
+                    Reset
+                  </button>
+                  {cityPairFailedByLine[`acmi-${idx}`] ? <span className="citypair-inline-error">CityPair not found. Insert manually.</span> : null}
                 </div>
               ))}
             </div>
@@ -3168,9 +3709,57 @@ function App() {
         {form.enableAdhocModule && !showBaselinePanel ? (
           <div className="tool-module-panel section-card">
             <h3>Adhoc module</h3>
+            <details>
+              <summary>How to use Adhoc module</summary>
+              <p>
+                Adhoc module calculates a minimum Adhoc price from selected Adhoc legs, using one common aircraft type for the whole module.
+              </p>
+              <ul>
+                <li>
+                  Choose <strong>Adhoc aircraft type (all lines)</strong> once. All active Adhoc lines use this aircraft in the calculation.
+                </li>
+                <li>
+                  Activate the lines you need, then set each line with <strong>From+To OR STD+STA OR BLH</strong>.
+                </li>
+                <li>
+                  BLH source priority per Adhoc line is: <strong>1) STD/STA</strong>, <strong>2) CityPair</strong>, <strong>3) manual BLH</strong>.
+                </li>
+                <li>
+                  CityPair lookup can take a moment; BLH shows <strong>Loading...</strong> while the lookup is running.
+                </li>
+                <li>
+                  Adhoc includes <strong>all expenses</strong> in its operating part (full DOC), then adds crew costs and own SCA add-ons.
+                </li>
+                <li>
+                  <strong>Adhoc safety margin (%)</strong> is applied on top of the base total to produce minimum total and minimum BLH prices.
+                </li>
+                <li>
+                  If no active line has valid BLH input yet, no Adhoc price is calculated.
+                </li>
+              </ul>
+            </details>
+            <p className="eu261-note">
+              CityPair BLH lookup can take a short moment to load. Please be patient after entering From/To.
+            </p>
+            <div className="grid compact">
+              <label>
+                Adhoc aircraft type (all lines)
+                <select
+                  value={form.adhocAircraft}
+                  onChange={(event) => update('adhocAircraft', event.target.value as FormState['adhocAircraft'])}
+                >
+                  <option value="">Select</option>
+                  {OWN_AIRCRAFT_OPTIONS.map((aircraft) => (
+                    <option key={`adhoc-global-air-${aircraft}`} value={aircraft}>
+                      {aircraft}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <div className="route-grid four-lines">
               {form.adhocLines.map((line, idx) => (
-                <div className="route-row with-controls" key={`adhoc-${idx}`}>
+                <div className="route-row with-controls module-row" key={`adhoc-${idx}`}>
                   <span>Adhoc #{idx + 1}</span>
                   <label className="mini-check">
                     <input
@@ -3180,38 +3769,69 @@ function App() {
                     />
                     Active
                   </label>
-                  <select
-                    value={line.aircraft}
-                    onChange={(event) => updateAdhocLine(idx, { aircraft: event.target.value as OwnBaseLineInput['aircraft'] })}
-                    disabled={!line.enabled}
-                  >
-                    <option value="">Select</option>
-                    {OWN_AIRCRAFT_OPTIONS.map((aircraft) => (
-                      <option key={`adhoc-air-${idx}-${aircraft}`} value={aircraft}>
-                        {aircraft}
-                      </option>
-                    ))}
-                  </select>
                   <input
                     value={line.leg.from}
-                    onChange={(event) => updateAdhocLine(idx, { leg: { from: event.target.value } })}
+                    onChange={(event) => updateAdhocLine(idx, { leg: { from: event.target.value, blh: '' } })}
                     placeholder="From"
-                  />
-                  <input
-                    value={line.leg.depUtc}
-                    onChange={(event) => updateAdhocLine(idx, { leg: { depUtc: event.target.value } })}
-                    placeholder="STD"
-                  />
-                  <input
-                    value={line.leg.arrUtc}
-                    onChange={(event) => updateAdhocLine(idx, { leg: { arrUtc: event.target.value } })}
-                    placeholder="STA"
+                    disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                   />
                   <input
                     value={line.leg.to}
-                    onChange={(event) => updateAdhocLine(idx, { leg: { to: event.target.value } })}
+                    onBlur={async () => {
+                      if (!line.enabled || line.manualBlhOverride) return
+                      const loadingKey = `adhoc-${idx}`
+                      setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                      setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                      try {
+                        const blh = await fetchOcdcCityPairBlh(line.leg.from, line.leg.to)
+                        if (blh) {
+                          updateAdhocLine(idx, { leg: { blh } })
+                          setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                        } else {
+                          setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: true }))
+                        }
+                      } finally {
+                        setCityPairLoadingByLine((prev) => ({ ...prev, [loadingKey]: false }))
+                      }
+                    }}
+                    onChange={(event) => updateAdhocLine(idx, { leg: { to: event.target.value, blh: '' } })}
                     placeholder="To"
+                    disabled={!line.enabled || hasTimedBlh(line.leg) || line.manualBlhOverride}
                   />
+                  <span>OR</span>
+                  <input
+                    value={line.leg.depUtc}
+                    onChange={(event) => updateAdhocLine(idx, { leg: { depUtc: event.target.value, blh: '' } })}
+                    placeholder="STD"
+                    disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                  />
+                  <input
+                    value={line.leg.arrUtc}
+                    onChange={(event) => updateAdhocLine(idx, { leg: { arrUtc: event.target.value, blh: '' } })}
+                    placeholder="STA"
+                    disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                  />
+                  <span>OR</span>
+                  <input
+                    value={cityPairLoadingByLine[`adhoc-${idx}`] ? 'Loading...' : line.leg.blh}
+                    onChange={(event) => updateAdhocLine(idx, { leg: { blh: event.target.value } })}
+                    placeholder={
+                      cityPairLoadingByLine[`adhoc-${idx}`]
+                        ? 'Loading...'
+                        : cityPairFailedByLine[`adhoc-${idx}`]
+                          ? 'Insert manually'
+                          : 'BLH HH:MM'
+                    }
+                    disabled={!line.enabled || hasStations(line.leg) || hasTimedBlh(line.leg)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => resetAdhocLine(idx)}
+                    disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}
+                  >
+                    Reset
+                  </button>
+                  {cityPairFailedByLine[`adhoc-${idx}`] ? <span className="citypair-inline-error">CityPair not found. Insert manually.</span> : null}
                 </div>
               ))}
             </div>
@@ -3551,7 +4171,7 @@ function App() {
                   <h3>Original baseline ({form.originalType})</h3>
                   <p>EUR to DKK: {form.eurToDkkRate.toFixed(2)}</p>
                   {(() => {
-                    const baselineSummary = getAuditComponentSummary(selectedOriginalType, activeLegs)
+                    const baselineSummary = getAuditComponentSummary(selectedOriginalType)
                     return (
                       <ul className="audit-kv-list">
                         <li>BLH total: {baselineSummary.blhTotal.toFixed(2)}</li>
@@ -3565,9 +4185,9 @@ function App() {
                     )
                   })()}
                   <ul>
-                    {activeLegs.map((leg, idx) => {
+                    {routeLegsWithStations.map(({ key, leg }, idx) => {
                       const blh =
-                        durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc) ??
+                        routeLegHoursByKey[key] ??
                         ownBlhDefaults[selectedOriginalType]
                       const doc = blh * ownDocPerBlhByAircraft[selectedOriginalType]
                       return (
@@ -3604,7 +4224,7 @@ function App() {
                           <div key={`${result.id}-${aircraft}`} className="audit-mini-block">
                             <strong>{aircraft}</strong>
                             {(() => {
-                              const aircraftSummary = getAuditComponentSummary(aircraft, activeLegs)
+                              const aircraftSummary = getAuditComponentSummary(aircraft)
                               return (
                                 <ul className="audit-kv-list">
                                   <li>BLH total: {aircraftSummary.blhTotal.toFixed(2)}</li>
@@ -3618,10 +4238,10 @@ function App() {
                               )
                             })()}
                             <ul>
-                              {activeLegs.map((leg, idx) => {
+                              {routeLegsWithStations.map(({ key, leg }, idx) => {
                                 const fallbackAircraft = getFallbackAircraftForAudit(aircraft)
                                 const blh =
-                                  durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc) ??
+                                  routeLegHoursByKey[key] ??
                                   (aircraft === 'SUB Narrowbody'
                                     ? baselineByAircraft['SUB Narrowbody'].blh
                                     : aircraft === 'SUB Widebody'
