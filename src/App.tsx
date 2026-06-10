@@ -28,6 +28,7 @@ type OwnBaseLineInput = {
   manualBlh: string
   manualBlhOverride: boolean
   flightNumber: string
+  departureDate: string
   aircraft: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
   leg: RouteLegInput
 }
@@ -60,8 +61,18 @@ type FormState = {
   adhocLines: OwnBaseLineInput[]
   acmiAircraft: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
   adhocAircraft: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+  acmiHotacNights: number
+  acmiCrewPerDiemOperatingDays: number
+  adhocCrewPerDiemOperatingDays: number
+  adhocHotacNights: number
+  acmiEmailRecipients: string
+  adhocEmailRecipients: string
+  adhocOfferSendInDanish: boolean
   acmiSafetyMarginPercent: number
   adhocSafetyMarginPercent: number
+  adhocUseFuelCorrection: boolean
+  adhocFuelPriceBasicRef: number
+  adhocFuelPriceCurrent: number
   subCharter1Lines: SubBaseLineInput[]
   subCharter2Lines: SubBaseLineInput[]
   subCharter3Lines: SubBaseLineInput[]
@@ -228,6 +239,28 @@ type BaselineAircraftParameters = {
   insurancePerFlight: number
 }
 
+type EcbFxResponse = {
+  dataSets?: Array<{
+    series?: Record<string, { observations?: Record<string, [number, ...unknown[]]> }>
+  }>
+}
+
+type OpenVanFuelResponse = {
+  success?: boolean
+  data?: Record<
+    string,
+    {
+      currency?: string
+      unit?: string
+      fetched_at?: string
+      prices?: {
+        gasoline?: number | null
+        diesel?: number | null
+      }
+    }
+  >
+}
+
 const DOC_COMPONENT_KEYS: Array<keyof NonNullable<AircraftRouteData['docComponents']>> = [
   'fuel',
   'uptake',
@@ -264,6 +297,13 @@ const NAVBLUE_PASSWORD = import.meta.env.VITE_NAVBLUE_PASSWORD?.trim() ?? ''
 const OCDC_API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || '/ocdc-api'
 const OCDC_BASE_URL = (import.meta.env.VITE_OCDC_BASE_URL?.trim() ?? OCDC_API_BASE_URL).replace(/\/+$/, '')
 const OCDC_API_KEY = import.meta.env.VITE_OCDC_API_KEY?.trim() ?? ''
+const EUR_DKK_RATE_API_URL = 'https://data-api.ecb.europa.eu/service/data/EXR/D.DKK.EUR.SP00.A?lastNObservations=1&format=jsondata'
+const OPENVAN_FUEL_PRICE_API_URL = 'https://openvan.camp/api/fuel/prices?source=sunclass-occ'
+const ESTIMATED_USD_PER_EUR = 1.08
+const ESTIMATED_LITERS_PER_MT = 1250
+const ADHOC_FUEL_REFERENCE_MARCH_USD_PER_MT = 1072.08
+const POWER_AUTOMATE_EMAIL_FLOW_URL =
+  'https://default98f2d82cc0374c5fa381074c142838.1c.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/66890b78e126475c882a7aed3c774ed3/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=5LJJQYljOn2LEb6Bfi7NGoWZURzvnulkNJXVFDQbnbk'
 const ADMIN_TOOLS_PASSWORD = import.meta.env.VITE_ADMIN_TOOLS_PASSWORD?.trim() || 'Sunclass'
 
 function sumComponentsPerBlh(components: Record<BaselineComponentKey, number>): number {
@@ -277,6 +317,45 @@ function nonMaintComponentsPerBlh(components: Record<BaselineComponentKey, numbe
 
 function roundToTwo(value: number): number {
   return Math.round(value * 100) / 100
+}
+
+function formatSourceFetchMeta(date: Date, source: string): string {
+  const monthNames = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+  const day = String(date.getDate()).padStart(2, '0')
+  const month = monthNames[date.getMonth()] ?? 'UNK'
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  return `${day}${month} ${hours}${minutes} ${source}`
+}
+
+function formatRateFetchMeta(date: Date): string {
+  return formatSourceFetchMeta(date, 'ECB')
+}
+
+function estimateUsdPerMtFromDkkPerLiter(dkkPerLiter: number, dkkPerEur: number): number {
+  if (!Number.isFinite(dkkPerLiter) || dkkPerLiter <= 0) return 0
+  if (!Number.isFinite(dkkPerEur) || dkkPerEur <= 0) return 0
+  return (dkkPerLiter * ESTIMATED_LITERS_PER_MT * ESTIMATED_USD_PER_EUR) / dkkPerEur
+}
+
+function estimateFuelConsumptionMt(
+  totalBlh: number,
+  fuelPerBlhDkk: number,
+  fuelCorrectionFactor: number,
+  fuelUsdPerMt: number,
+  dkkPerEur: number,
+): number {
+  if (!Number.isFinite(totalBlh) || totalBlh <= 0) return 0
+  if (!Number.isFinite(fuelPerBlhDkk) || fuelPerBlhDkk <= 0) return 0
+  if (!Number.isFinite(fuelCorrectionFactor) || fuelCorrectionFactor <= 0) return 0
+  if (!Number.isFinite(fuelUsdPerMt) || fuelUsdPerMt <= 0) return 0
+  if (!Number.isFinite(dkkPerEur) || dkkPerEur <= 0) return 0
+  const dkkPerUsd = dkkPerEur / ESTIMATED_USD_PER_EUR
+  if (!Number.isFinite(dkkPerUsd) || dkkPerUsd <= 0) return 0
+  const dkkPerMt = fuelUsdPerMt * dkkPerUsd
+  if (!Number.isFinite(dkkPerMt) || dkkPerMt <= 0) return 0
+  const adjustedFuelCostDkk = totalBlh * fuelPerBlhDkk * fuelCorrectionFactor
+  return adjustedFuelCostDkk / dkkPerMt
 }
 
 type AuditComponentSummary = {
@@ -413,6 +492,7 @@ function emptyOwnBaseLine(): OwnBaseLineInput {
     manualBlh: '',
     manualBlhOverride: false,
     flightNumber: '',
+    departureDate: '',
     aircraft: '',
     leg: emptyLeg(),
   }
@@ -449,6 +529,8 @@ function formatBlhFromHours(hours: number | null): string {
 function hasPositioningBlhInput(line: { manualBlh: string; leg: RouteLegInput }): boolean {
   const manual = parseBlhHours(line.manualBlh)
   if (manual !== null && manual > 0) return true
+  const legBlh = parseBlhHours(line.leg.blh)
+  if (legBlh !== null && legBlh > 0) return true
   const timed = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)
   return timed !== null && timed > 0
 }
@@ -549,13 +631,12 @@ function normalizeFlightNumber(input: string): string {
 
 function normalizeOptionalFlightNumber(input: string): string {
   const normalized = input.trim().toUpperCase().replace(/\s+/g, '')
-  if (!normalized) return ''
-  return normalized.startsWith('DK') ? normalized : `DK${normalized}`
+  return normalized
 }
 
 function formatSubjectDate(input: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input)) return '[DATE]'
-  const [, monthStr, dayStr, yearStr] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input) ?? []
+  const [, yearStr, monthStr, dayStr] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input) ?? []
   if (!monthStr || !dayStr || !yearStr) return '[DATE]'
   const monthNames = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
   const monthIdx = Number(monthStr) - 1
@@ -657,6 +738,17 @@ function durationHoursFromUtcTimes(departureUtc: string, arrivalUtc: string): nu
   return durationMinutes / 60
 }
 
+function deriveArrivalUtcFromDepartureAndBlh(departureUtc: string, blh: string): string | null {
+  const depMinutes = parseUtcTimeToMinutes(departureUtc)
+  const blhHours = parseBlhHours(blh)
+  if (depMinutes === null || blhHours === null || blhHours <= 0) return null
+  const totalMinutes = Math.round(blhHours * 60)
+  const arrMinutes = (depMinutes + totalMinutes) % (24 * 60)
+  const hour = Math.floor(arrMinutes / 60)
+  const minute = arrMinutes % 60
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+}
+
 function toCurrency(value: number): string {
   return new Intl.NumberFormat('da-DK', {
     style: 'currency',
@@ -678,6 +770,11 @@ function toSignedDkkDelta(value: number): string {
   if (value > 0) return `+${abs}`
   if (value < 0) return `-${abs}`
   return abs
+}
+
+function roundUpToNearestHundred(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0
+  return Math.ceil(value / 100) * 100
 }
 
 function asBand(value: number): 400 | 600 {
@@ -745,11 +842,30 @@ const INITIAL_FORM: FormState = {
   leg4: emptyLeg(),
   ownBaseLines: [emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine()],
   acmiLines: [emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine()],
-  adhocLines: [emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine(), emptyOwnBaseLine()],
+  adhocLines: [
+    emptyOwnBaseLine(),
+    emptyOwnBaseLine(),
+    emptyOwnBaseLine(),
+    emptyOwnBaseLine(),
+    emptyOwnBaseLine(),
+    emptyOwnBaseLine(),
+    emptyOwnBaseLine(),
+    emptyOwnBaseLine(),
+  ],
   acmiAircraft: '',
   adhocAircraft: '',
-  acmiSafetyMarginPercent: 0,
-  adhocSafetyMarginPercent: 0,
+  acmiHotacNights: 0,
+  acmiCrewPerDiemOperatingDays: 0,
+  adhocCrewPerDiemOperatingDays: 0,
+  adhocHotacNights: 0,
+  acmiEmailRecipients: '',
+  adhocEmailRecipients: '',
+  adhocOfferSendInDanish: false,
+  acmiSafetyMarginPercent: 20,
+  adhocSafetyMarginPercent: 20,
+  adhocUseFuelCorrection: true,
+  adhocFuelPriceBasicRef: ADHOC_FUEL_REFERENCE_MARCH_USD_PER_MT,
+  adhocFuelPriceCurrent: 100,
   subCharter1Lines: [emptySubBaseLine(), emptySubBaseLine()],
   subCharter2Lines: [emptySubBaseLine(), emptySubBaseLine()],
   subCharter3Lines: [emptySubBaseLine(), emptySubBaseLine()],
@@ -794,13 +910,99 @@ const INITIAL_FORM: FormState = {
   navblueInfantsByLeg: ['', '', '', ''],
 }
 
+function ensureLineCount<T>(lines: T[], target: number, makeEmpty: () => T): T[] {
+  if (lines.length >= target) return lines
+  return [...lines, ...Array.from({ length: target - lines.length }, () => makeEmpty())]
+}
+
 function App() {
   const [form, setForm] = useState<FormState>(INITIAL_FORM)
+  const [eurRateFetchMeta, setEurRateFetchMeta] = useState('')
+  const initialLoadedEurRate = useRef(INITIAL_FORM.eurToDkkRate)
+  const [adhocFuelFetchMeta, setAdhocFuelFetchMeta] = useState('')
+  const initialLoadedAdhocFuelBasic = useRef(INITIAL_FORM.adhocFuelPriceBasicRef)
+  const initialLoadedAdhocFuelCurrent = useRef(INITIAL_FORM.adhocFuelPriceCurrent)
   const [eu261ByScenario, setEu261ByScenario] = useState<Record<string, ScenarioEu261Selection>>({})
   const [cityPairLoadingByLine, setCityPairLoadingByLine] = useState<Record<string, boolean>>({})
   const [cityPairFailedByLine, setCityPairFailedByLine] = useState<Record<string, boolean>>({})
+  const [emailConfirmState, setEmailConfirmState] = useState<{
+    type: 'acmi-internal' | 'acmi-client' | 'adhoc-internal' | 'adhoc-client'
+    recipients: string
+  } | null>(null)
   const [adminPromptTarget, setAdminPromptTarget] = useState<null | 'acmi' | 'adhoc' | 'baseline'>(null)
   const [adminPasswordInput, setAdminPasswordInput] = useState('')
+
+  useEffect(() => {
+    setForm((prev) => {
+      const nextAdhocLines = ensureLineCount(prev.adhocLines, 8, emptyOwnBaseLine)
+      return nextAdhocLines === prev.adhocLines ? prev : { ...prev, adhocLines: nextAdhocLines }
+    })
+  }, [])
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const response = await fetch(EUR_DKK_RATE_API_URL)
+        if (!response.ok) return
+        const payload = (await response.json()) as EcbFxResponse
+        const series = payload.dataSets?.[0]?.series
+        if (!series) return
+        const firstSeries = Object.values(series)[0]
+        const observations = firstSeries?.observations
+        if (!observations) return
+        const firstObservation = Object.values(observations)[0]
+        const rawRate = Number(firstObservation?.[0] ?? NaN)
+        if (!Number.isFinite(rawRate) || rawRate <= 0) return
+        const roundedRate = roundToTwo(rawRate)
+        if (cancelled) return
+        initialLoadedEurRate.current = roundedRate
+        setEurRateFetchMeta(formatRateFetchMeta(new Date()))
+        setForm((prev) => (prev.eurToDkkRate === roundedRate ? prev : { ...prev, eurToDkkRate: roundedRate }))
+      } catch {
+        // Keep default/manual rate if API fetch fails.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const response = await fetch(OPENVAN_FUEL_PRICE_API_URL)
+        if (!response.ok) return
+        const payload = (await response.json()) as OpenVanFuelResponse
+        const dk = payload.data?.DK
+        const rawDieselDkkPerLiter = Number(dk?.prices?.diesel ?? dk?.prices?.gasoline ?? NaN)
+        if (!Number.isFinite(rawDieselDkkPerLiter) || rawDieselDkkPerLiter <= 0) return
+        if (cancelled) return
+        const roundedUsdPerMt = roundToTwo(estimateUsdPerMtFromDkkPerLiter(rawDieselDkkPerLiter, form.eurToDkkRate))
+        if (!Number.isFinite(roundedUsdPerMt) || roundedUsdPerMt <= 0) return
+        initialLoadedAdhocFuelCurrent.current = roundedUsdPerMt
+        const fetchedAtCandidate = dk?.fetched_at ? new Date(dk.fetched_at) : new Date()
+        const fetchedAt = Number.isNaN(fetchedAtCandidate.getTime()) ? new Date() : fetchedAtCandidate
+        setAdhocFuelFetchMeta(formatSourceFetchMeta(fetchedAt, 'OPENVAN'))
+        setForm((prev) => {
+          if (prev.adhocFuelPriceCurrent === roundedUsdPerMt) return prev
+          return {
+            ...prev,
+            adhocFuelPriceCurrent: roundedUsdPerMt,
+          }
+        })
+      } catch {
+        // Keep manual/default value if fuel API fetch fails.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  useEffect(() => {
+    if (form.acmiSafetyMarginPercent < 20) {
+      setForm((prev) => ({ ...prev, acmiSafetyMarginPercent: 20 }))
+    }
+  }, [form.acmiSafetyMarginPercent])
   const [routeCityPairLoadingByLeg, setRouteCityPairLoadingByLeg] = useState<Record<'leg1' | 'leg2' | 'leg3' | 'leg4', boolean>>({
     leg1: false,
     leg2: false,
@@ -821,7 +1023,21 @@ function App() {
     acmi: '',
     adhoc: '',
   })
+  const historyDebounceTimers = useRef<{
+    main: ReturnType<typeof setTimeout> | null
+    acmi: ReturnType<typeof setTimeout> | null
+    adhoc: ReturnType<typeof setTimeout> | null
+  }>({
+    main: null,
+    acmi: null,
+    adhoc: null,
+  })
   const isToolMode = form.enableAcmiModule || form.enableAdhocModule
+  const activeHistoryMode: 'main' | 'acmi' | 'adhoc' = form.enableAcmiModule ? 'acmi' : form.enableAdhocModule ? 'adhoc' : 'main'
+  const visibleScenarioHistory = useMemo(
+    () => scenarioHistory.filter((entry) => entry.mode === activeHistoryMode),
+    [activeHistoryMode, scenarioHistory],
+  )
   const [baselineByAircraft, setBaselineByAircraft] = useState<Record<BaselineAircraftKey, BaselineAircraftParameters>>(() => {
     const fromDefault = (aircraftCode: 'A321' | 'A321N' | 'A339' | 'SUB_NARROWBODY'): BaselineAircraftParameters => {
       const componentPerBlhRaw = data.aircraftComponentDefaults?.[aircraftCode]?.componentPerBlh ?? {}
@@ -1790,6 +2006,23 @@ function App() {
     }))
   }
 
+  function getRouteLegBlhDisplayValue(key: 'leg1' | 'leg2' | 'leg3' | 'leg4'): string {
+    if (routeCityPairLoadingByLeg[key]) return 'Loading...'
+    const leg = normalizeLegInput(form[key])
+    const timed = durationHoursFromUtcTimes(leg.depUtc, leg.arrUtc)
+    if (timed !== null && timed > 0) return formatBlhFromHours(timed)
+    if (leg.blh.trim().length > 0) return leg.blh
+    if (routeCityPairBlhByLeg[key].trim().length > 0) return routeCityPairBlhByLeg[key]
+    return ''
+  }
+
+  function getModuleLegBlhDisplayValue(line: OwnBaseLineInput, loadingKey: string): string {
+    if (cityPairLoadingByLine[loadingKey]) return 'Loading...'
+    const timed = durationHoursFromUtcTimes(line.leg.depUtc, line.leg.arrUtc)
+    if (timed !== null && timed > 0) return formatBlhFromHours(timed)
+    return line.leg.blh
+  }
+
   async function tryFetchRouteCityPairBlh(key: 'leg1' | 'leg2' | 'leg3' | 'leg4') {
     const leg = normalizeLegInput(form[key])
     if (!hasStations(leg)) return
@@ -1850,21 +2083,46 @@ function App() {
     })
   }
 
-  function updateAcmiLine(index: number, updates: { enabled?: boolean; aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>; flightNumber?: string; leg?: Partial<RouteLegInput> }) {
+  function updateAcmiLine(
+    index: number,
+    updates: {
+      enabled?: boolean
+      aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+      flightNumber?: string
+      departureDate?: string
+      manualBlhOverride?: boolean
+      leg?: Partial<RouteLegInput>
+    },
+  ) {
     setForm((prev) => {
       const next = [...prev.acmiLines]
       const current = next[index]
       const nextLeg = updates.leg ? { ...current.leg, ...updates.leg } : current.leg
       const normalizedBlh = normalizeBlhInput(nextLeg.blh ?? '')
-      const hasManualBlh = normalizedBlh.length > 0
+      const hasBlhUpdate = Boolean(updates.leg && 'blh' in updates.leg)
+      const hasManualBlhInput = hasBlhUpdate && normalizedBlh.length > 0
+      const hasTimeUpdate = Boolean(updates.leg && ('depUtc' in updates.leg || 'arrUtc' in updates.leg))
 
       next[index] = {
         ...current,
         ...updates,
         flightNumber:
           typeof updates.flightNumber === 'string' ? normalizeOptionalFlightNumber(updates.flightNumber) : current.flightNumber,
-        manualBlhOverride: hasManualBlh,
-        manualBlh: hasManualBlh ? normalizedBlh : formatBlhFromHours(durationHoursFromUtcTimes(nextLeg.depUtc, nextLeg.arrUtc)),
+        departureDate: typeof updates.departureDate === 'string' ? updates.departureDate.trim() : current.departureDate,
+        manualBlhOverride:
+          typeof updates.manualBlhOverride === 'boolean'
+            ? updates.manualBlhOverride
+            : hasBlhUpdate
+              ? hasManualBlhInput
+              : hasTimeUpdate
+                ? current.manualBlhOverride
+                : current.manualBlhOverride,
+        manualBlh:
+          hasBlhUpdate
+            ? normalizedBlh
+            : hasTimeUpdate
+              ? current.manualBlh
+              : current.manualBlh,
         leg: {
           from: normalizeStation(nextLeg.from),
           depUtc: normalizeUtcInput(nextLeg.depUtc),
@@ -1879,21 +2137,46 @@ function App() {
     })
   }
 
-  function updateAdhocLine(index: number, updates: { enabled?: boolean; aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>; flightNumber?: string; leg?: Partial<RouteLegInput> }) {
+  function updateAdhocLine(
+    index: number,
+    updates: {
+      enabled?: boolean
+      aircraft?: '' | Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+      flightNumber?: string
+      departureDate?: string
+      manualBlhOverride?: boolean
+      leg?: Partial<RouteLegInput>
+    },
+  ) {
     setForm((prev) => {
       const next = [...prev.adhocLines]
       const current = next[index]
       const nextLeg = updates.leg ? { ...current.leg, ...updates.leg } : current.leg
       const normalizedBlh = normalizeBlhInput(nextLeg.blh ?? '')
-      const hasManualBlh = normalizedBlh.length > 0
+      const hasBlhUpdate = Boolean(updates.leg && 'blh' in updates.leg)
+      const hasManualBlhInput = hasBlhUpdate && normalizedBlh.length > 0
+      const hasTimeUpdate = Boolean(updates.leg && ('depUtc' in updates.leg || 'arrUtc' in updates.leg))
 
       next[index] = {
         ...current,
         ...updates,
         flightNumber:
           typeof updates.flightNumber === 'string' ? normalizeOptionalFlightNumber(updates.flightNumber) : current.flightNumber,
-        manualBlhOverride: hasManualBlh,
-        manualBlh: hasManualBlh ? normalizedBlh : formatBlhFromHours(durationHoursFromUtcTimes(nextLeg.depUtc, nextLeg.arrUtc)),
+        departureDate: typeof updates.departureDate === 'string' ? updates.departureDate.trim() : current.departureDate,
+        manualBlhOverride:
+          typeof updates.manualBlhOverride === 'boolean'
+            ? updates.manualBlhOverride
+            : hasBlhUpdate
+              ? hasManualBlhInput
+              : hasTimeUpdate
+                ? current.manualBlhOverride
+                : current.manualBlhOverride,
+        manualBlh:
+          hasBlhUpdate
+            ? normalizedBlh
+            : hasTimeUpdate
+              ? current.manualBlh
+              : current.manualBlh,
         leg: {
           from: normalizeStation(nextLeg.from),
           depUtc: normalizeUtcInput(nextLeg.depUtc),
@@ -2034,9 +2317,17 @@ function App() {
   }
 
   function resetAll() {
-    setForm(INITIAL_FORM)
+    setForm({
+      ...INITIAL_FORM,
+      eurToDkkRate: initialLoadedEurRate.current,
+      adhocFuelPriceBasicRef: initialLoadedAdhocFuelBasic.current,
+      adhocFuelPriceCurrent: initialLoadedAdhocFuelCurrent.current,
+    })
     setEu261ByScenario({})
+    setCityPairLoadingByLine({})
     setCityPairFailedByLine({})
+    setRouteCityPairLoadingByLeg({ leg1: false, leg2: false, leg3: false, leg4: false })
+    setRouteCityPairBlhByLeg({ leg1: '', leg2: '', leg3: '', leg4: '' })
   }
 
   function withFallback(value: string, placeholder: string): string {
@@ -2051,22 +2342,74 @@ function App() {
       .map(({ line, index }) => {
         const derivedBlh = derivePositioningBlh(line)
         const blhText = derivedBlh > 0 ? formatBlhFromHours(derivedBlh) : withFallback(line.leg.blh, 'BLH')
+        const flightNumber = line.flightNumber.trim()
         return {
           lineLabel: `${modulePrefix} #${index + 1}`,
-          flightNumber: withFallback(line.flightNumber, 'FlightNo'),
+          flightNumber: flightNumber || (modulePrefix === 'ACMI' ? 'Pls Advise' : '[FlightNo]'),
           from: withFallback(line.leg.from, 'From'),
           to: withFallback(line.leg.to, 'To'),
-          std: withFallback(line.leg.depUtc, 'STD'),
-          sta: withFallback(line.leg.arrUtc, 'STA'),
+          departureDate: line.departureDate.trim(),
+          std: line.leg.depUtc.trim(),
+          sta: line.leg.arrUtc.trim(),
           blh: blhText,
         }
       })
   }
 
+  function buildModuleRoutingTableLines(lines: OwnBaseLineInput[], modulePrefix: 'ACMI' | 'Adhoc'): string[] {
+    const rows = buildModuleRoutingRows(lines, modulePrefix).map((row) => [
+      row.departureDate ? formatSubjectDate(row.departureDate) : '[DATE]',
+      row.flightNumber,
+      `${row.from}-${row.to}`,
+      row.std || (modulePrefix === 'ACMI' ? 'TBD' : '[STD]'),
+      row.sta || (modulePrefix === 'ACMI' ? 'TBD' : '[STA]'),
+      row.blh,
+    ])
+    if (rows.length === 0) return ['No active legs yet']
+    return buildAsciiTable(['Date', 'Flight no', 'Route', 'STD', 'STA', 'BLH'], rows)
+  }
+
+  function getModuleStartDateText(lines: OwnBaseLineInput[]): string {
+    const firstDate = lines.find((line) => line.enabled && line.departureDate.trim().length > 0)?.departureDate ?? ''
+    const formatted = formatSubjectDate(firstDate)
+    return formatted === '[DATE]' ? '[Start date]' : formatted
+  }
+
+  function getModuleStartDateForSubject(lines: OwnBaseLineInput[]): string {
+    const firstDate = lines.find((line) => line.enabled && line.departureDate.trim().length > 0)?.departureDate ?? ''
+    const formatted = formatSubjectDate(firstDate)
+    return formatted === '[DATE]' ? '[STARTDATE]' : formatted
+  }
+
   function buildModuleRoutingOverview(lines: OwnBaseLineInput[], modulePrefix: 'ACMI' | 'Adhoc'): string[] {
     return buildModuleRoutingRows(lines, modulePrefix).map(
-      (row) => `${row.lineLabel}: FLT ${row.flightNumber} | ${row.from}-${row.to} | STD ${row.std} | STA ${row.sta} | BLH ${row.blh}`,
+      (row) =>
+        `${row.lineLabel}: FLT ${row.flightNumber} | ${row.from}-${row.to} | ${formatTimeForMail(row.std, 'STD')} | ${formatTimeForMail(row.sta, 'STA')} | BLH ${row.blh}`,
     )
+  }
+
+  function isModuleLineComplete(line: OwnBaseLineInput): boolean {
+    if (!line.enabled) return true
+    if (!line.flightNumber.trim()) return false
+    if (!normalizeStation(line.leg.from) || !normalizeStation(line.leg.to)) return false
+    if (!line.leg.depUtc.trim() || !line.leg.arrUtc.trim()) return false
+    return hasPositioningBlhInput(line)
+  }
+
+  function clearHistoryDebounce(mode: 'main' | 'acmi' | 'adhoc') {
+    const timer = historyDebounceTimers.current[mode]
+    if (timer) {
+      clearTimeout(timer)
+      historyDebounceTimers.current[mode] = null
+    }
+  }
+
+  function debounceHistoryPush(mode: 'main' | 'acmi' | 'adhoc', cb: () => void) {
+    clearHistoryDebounce(mode)
+    historyDebounceTimers.current[mode] = setTimeout(() => {
+      historyDebounceTimers.current[mode] = null
+      cb()
+    }, 1200)
   }
 
   function pushScenarioHistory(mode: 'main' | 'acmi' | 'adhoc', signature: string, title: string, summaryLines: string[]) {
@@ -2095,13 +2438,202 @@ function App() {
     return [separator, toLine(headers), separator, ...rows.map((row) => toLine(row)), separator]
   }
 
-  function openEmailDraft(subject: string, bodyLines: string[]) {
-    const body = bodyLines.join('\n')
-    window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+  function getCrewPerDiemRateEurPerDay(aircraft: Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>): number {
+    return aircraft === 'A339' ? 10 * 120 : 7 * 120
+  }
+
+  function getHotacRateDkkPerNight(aircraft: Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>): number {
+    return aircraft === 'A339' ? 10 * 1000 : 7 * 1000
+  }
+
+  function parseRecipientList(input: string): string {
+    return input
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .join(',')
+  }
+
+  function requestEmailConfirm(
+    type: 'acmi-internal' | 'acmi-client' | 'adhoc-internal' | 'adhoc-client',
+    recipientsInput: string,
+  ) {
+    setEmailConfirmState({
+      type,
+      recipients: parseRecipientList(recipientsInput),
+    })
+  }
+
+  function escapeHtml(input: string): string {
+    return input
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+  }
+
+  function isAsciiTableBorder(line: string): boolean {
+    return /^\+-[-+]+\+$/.test(line.trim())
+  }
+
+  function parseAsciiTableRow(line: string): string[] | null {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return null
+    return trimmed
+      .slice(1, -1)
+      .split('|')
+      .map((cell) => cell.trim())
+  }
+
+  function buildHtmlTableFromAscii(lines: string[], startIdx: number): { html: string; nextIdx: number } | null {
+    if (!isAsciiTableBorder(lines[startIdx] ?? '')) return null
+    const headerCells = parseAsciiTableRow(lines[startIdx + 1] ?? '')
+    if (!headerCells) return null
+    const rows: string[][] = []
+    let idx = startIdx + 3
+    while (idx < lines.length) {
+      const current = lines[idx] ?? ''
+      if (isAsciiTableBorder(current)) {
+        return {
+          html: `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;width:100%;max-width:860px;margin:8px 0;border:1px solid #d1d5db;"><thead><tr>${headerCells
+            .map(
+              (cell) =>
+                `<th align="left" valign="top" style="border:1px solid #d1d5db;padding:6px 8px;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:18px;color:#111827;font-weight:700;">${escapeHtml(cell)}</th>`,
+            )
+            .join('')}</tr></thead><tbody>${rows
+            .map(
+              (row) =>
+                `<tr>${row
+                  .map(
+                    (cell) =>
+                      `<td align="left" valign="top" style="border:1px solid #d1d5db;padding:6px 8px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:18px;color:#111827;">${escapeHtml(cell)}</td>`,
+                  )
+                  .join('')}</tr>`,
+            )
+            .join('')}</tbody></table>`,
+          nextIdx: idx + 1,
+        }
+      }
+      const row = parseAsciiTableRow(current)
+      if (row) rows.push(row)
+      idx += 1
+    }
+    return null
+  }
+
+  function buildHtmlEmailBody(bodyLines: string[]): string {
+    const blocks: string[] = []
+    let idx = 0
+    while (idx < bodyLines.length) {
+      const line = bodyLines[idx] ?? ''
+      const trimmed = line.trim()
+      if (trimmed === '__SIGNATURE_SPACER__') {
+        blocks.push('<div style="height:12px;line-height:12px;">&nbsp;</div>')
+        idx += 1
+        continue
+      }
+      if (!trimmed) {
+        idx += 1
+        continue
+      }
+      const table = buildHtmlTableFromAscii(bodyLines, idx)
+      if (table) {
+        blocks.push(table.html)
+        idx = table.nextIdx
+        continue
+      }
+      if (/^[A-Z0-9 ()/%-]{3,}$/.test(trimmed) && !trimmed.startsWith('-')) {
+        blocks.push(
+          `<h3 style="margin:14px 0 6px 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#1f2937;font-weight:700;">${escapeHtml(
+            trimmed,
+          )}</h3>`,
+        )
+      } else if (trimmed === 'Hello,' || trimmed === 'Hej,') {
+        blocks.push(
+          `<p style="margin:4px 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111827;">${escapeHtml(
+            line,
+          )}</p>`,
+        )
+        blocks.push('<div style="height:12px;line-height:12px;">&nbsp;</div>')
+      } else if (trimmed.startsWith('- ')) {
+        blocks.push(
+          `<p style="margin:4px 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111827;">&bull; ${escapeHtml(
+            trimmed.slice(2),
+          )}</p>`,
+        )
+      } else {
+        blocks.push(
+          `<p style="margin:4px 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111827;">${escapeHtml(
+            line,
+          )}</p>`,
+        )
+      }
+      idx += 1
+    }
+
+    return `<!doctype html><html><head><meta charset="utf-8" /></head><body style="margin:0;padding:16px;background:#ffffff;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;width:100%;"><tr><td align="left" valign="top" style="font-family:Arial,Helvetica,sans-serif;">${blocks.join(
+      '',
+    )}</td></tr></table></body></html>`
+  }
+
+  async function openEmailDraftToRecipients(
+    subject: string,
+    bodyLines: string[],
+    recipientsInput: string,
+    signatureOverride?: string[],
+  ): Promise<{ channel: 'flow'; cancelled: boolean }> {
+    const signatureLines =
+      signatureOverride ??
+      [
+        '__SIGNATURE_SPACER__',
+        'Kind regards,',
+        '',
+        'OCC Duty Officer',
+        'Sunclass Airlines',
+        'Phone: +45 3247 7385',
+        'occ@sunclass.dk',
+      ]
+    const bodyHtml = buildHtmlEmailBody([...bodyLines, ...signatureLines])
+    const recipients = parseRecipientList(recipientsInput)
+    if (!recipients) {
+      window.alert('Please enter at least one email recipient.')
+      return { channel: 'flow', cancelled: true }
+    }
+    const payload = {
+      emailTo: recipients,
+      emailSubject: subject,
+      emailBody: bodyHtml,
+    }
+
+    try {
+      const response = await fetch(POWER_AUTOMATE_EMAIL_FLOW_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) throw new Error(`Flow request failed with status ${response.status}`)
+      return { channel: 'flow', cancelled: false }
+    } catch (error) {
+      console.error('Power Automate email flow failed.', error)
+      window.alert('Email could not be sent via Power Automate. Please check flow setup/payload.')
+      return { channel: 'flow', cancelled: true }
+    }
   }
 
   function kvLine(label: string, value: string): string {
     return `${label.padEnd(22)} ${value}`
+  }
+
+  function formatTimeForMail(value: string, label: 'STD' | 'STA'): string {
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? `${label} ${trimmed}` : `[${label}]`
+  }
+
+  function getFuelCorrectionFactor(currentFuelPrice: number, basicFuelPrice: number): number {
+    if (!Number.isFinite(currentFuelPrice) || currentFuelPrice < 0) return 1
+    if (!Number.isFinite(basicFuelPrice) || basicFuelPrice <= 0) return 1
+    return Math.max(0, currentFuelPrice / basicFuelPrice)
   }
 
   const acmiBreakdown = useMemo<AcmiBreakdown | null>(() => {
@@ -2109,25 +2641,24 @@ function App() {
     const lines = enabledAcmiLines
     if (lines.length === 0) return null
 
-    const ownScaExtraHotacDkk = typeof form.ownScaExtraHotacDkk === 'number' ? form.ownScaExtraHotacDkk : 0
-    const ownScaExtraCrewPerDiemEur =
-      typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0
+    const acmiAircraft = (form.acmiAircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+    const acmiHotacDkk = form.acmiHotacNights * getHotacRateDkkPerNight(acmiAircraft)
+    const ownScaExtraCrewPerDiemEur = form.acmiCrewPerDiemOperatingDays * getCrewPerDiemRateEurPerDay(acmiAircraft)
 
     let totalBlh = 0
     let operatingCost = 0
     const details: string[] = []
 
     lines.forEach((line, index) => {
-      const aircraft = (form.acmiAircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
-      const blh = derivePositioningBlh(line) || ownBlhDefaults[aircraft]
-      const docPerBlh = acmiDocPerBlhByAircraft[aircraft]
+      const blh = derivePositioningBlh(line) || ownBlhDefaults[acmiAircraft]
+      const docPerBlh = acmiDocPerBlhByAircraft[acmiAircraft]
       const lineCost = blh * docPerBlh
       const excludedPerBlh = 0
 
       totalBlh += blh
       operatingCost += lineCost
       details.push(
-        `ACMI leg ${index + 1} (${aircraft}): ${blh.toFixed(2)} BLH * ${docPerBlh.toFixed(2)} = ${toCurrency(lineCost)}`,
+        `ACMI leg ${index + 1} (${acmiAircraft}): ${blh.toFixed(2)} BLH * ${docPerBlh.toFixed(2)} = ${toCurrency(lineCost)}`,
       )
       if (excludedPerBlh > 0) {
         details.push(
@@ -2144,9 +2675,10 @@ function App() {
       form.crewCostCabinDays * form.crewCostCabinDkkPerDay +
       form.crewCostCabinSdDays * form.crewCostCabinSdDkkPerDay
     const ownAddOns =
-      (form.ownIncludeScaExtraHotac ? ownScaExtraHotacDkk : 0) +
+      (form.ownIncludeScaExtraHotac ? acmiHotacDkk : 0) +
       (form.ownIncludeScaExtraCrewPerDiem ? ownScaExtraCrewPerDiemEur * form.eurToDkkRate : 0)
-    const marginMultiplier = 1 + Math.max(0, form.acmiSafetyMarginPercent) / 100
+    const acmiProfitPercent = Math.max(20, form.acmiSafetyMarginPercent)
+    const marginMultiplier = 1 + acmiProfitPercent / 100
     const baseCostDkk = operatingCost + crewCost + ownAddOns
     const totalCostDkk = baseCostDkk * marginMultiplier
     const marginDkk = totalCostDkk - baseCostDkk
@@ -2155,7 +2687,11 @@ function App() {
 
     details.push(`Crew cost contribution: ${toCurrency(crewCost)}`)
     details.push(`SCA add-ons contribution: ${toCurrency(ownAddOns)}`)
-    details.push(`Safety margin: ${form.acmiSafetyMarginPercent.toFixed(0)}%`)
+    details.push(`HOTAC setup: ${form.acmiHotacNights} nights * ${getHotacRateDkkPerNight(acmiAircraft)} DKK/night`)
+    details.push(
+      `Crew per Diem setup: ${form.acmiCrewPerDiemOperatingDays} days * ${getCrewPerDiemRateEurPerDay(acmiAircraft)} EUR/day`,
+    )
+    details.push(`ACMI profit: ${acmiProfitPercent.toFixed(0)}%`)
     details.push('Excluded from ACMI minimum price: Fuel, Handling, Turnaround aircraft, Turnaround pax.')
 
     return {
@@ -2173,6 +2709,8 @@ function App() {
     enabledAcmiLines,
     form.acmiSafetyMarginPercent,
     form.acmiAircraft,
+    form.acmiHotacNights,
+    form.acmiCrewPerDiemOperatingDays,
     form.crewCostCabinDays,
     form.crewCostCabinDkkPerDay,
     form.crewCostCabinSdDays,
@@ -2185,8 +2723,6 @@ function App() {
     form.eurToDkkRate,
     form.ownIncludeScaExtraCrewPerDiem,
     form.ownIncludeScaExtraHotac,
-    form.ownScaExtraCrewPerDiemEur,
-    form.ownScaExtraHotacDkk,
     selectedOriginalType,
   ])
 
@@ -2195,24 +2731,33 @@ function App() {
     const lines = enabledAdhocLines
     if (lines.length === 0) return null
 
-    const ownScaExtraHotacDkk = typeof form.ownScaExtraHotacDkk === 'number' ? form.ownScaExtraHotacDkk : 0
-    const ownScaExtraCrewPerDiemEur =
-      typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0
+    const adhocAircraft = (form.adhocAircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+    const ownScaExtraCrewPerDiemEur = form.adhocCrewPerDiemOperatingDays * getCrewPerDiemRateEurPerDay(adhocAircraft)
+    const adhocHotacDkk = form.adhocHotacNights * getHotacRateDkkPerNight(adhocAircraft)
+    const fuelPerBlh = baselineByAircraft[adhocAircraft].componentsPerBlh.fuel ?? 0
+    const nonFuelPerBlh = Math.max(0, ownDocPerBlhByAircraft[adhocAircraft] - fuelPerBlh)
+    const ownershipAndMaintPerBlh =
+      baselineByAircraft[adhocAircraft].ownershipCostPerBlh + baselineByAircraft[adhocAircraft].maintenanceFixedPerBlh
+    const insurancePerFlight = baselineByAircraft[adhocAircraft].insurancePerFlight
+    const fuelCorrectionFactor = form.adhocUseFuelCorrection
+      ? getFuelCorrectionFactor(form.adhocFuelPriceCurrent, form.adhocFuelPriceBasicRef)
+      : 1
+    const adjustedDocPerBlh = nonFuelPerBlh + fuelPerBlh * fuelCorrectionFactor
 
     let totalBlh = 0
     let operatingCost = 0
     const details: string[] = []
 
     lines.forEach((line, index) => {
-      const aircraft = (form.adhocAircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
-      const blh = derivePositioningBlh(line) || ownBlhDefaults[aircraft]
-      const docPerBlh = ownDocPerBlhByAircraft[aircraft]
-      const lineCost = blh * docPerBlh
+      const blh = derivePositioningBlh(line) || ownBlhDefaults[adhocAircraft]
+      const lineCost = blh * adjustedDocPerBlh + blh * ownershipAndMaintPerBlh + insurancePerFlight
 
       totalBlh += blh
       operatingCost += lineCost
       details.push(
-        `Adhoc leg ${index + 1} (${aircraft}): ${blh.toFixed(2)} BLH * ${docPerBlh.toFixed(2)} = ${toCurrency(lineCost)}`,
+        `Adhoc leg ${index + 1} (${adhocAircraft}): DOC ${blh.toFixed(2)} * ${adjustedDocPerBlh.toFixed(2)} + fixed ${blh.toFixed(
+          2,
+        )} * ${(ownershipAndMaintPerBlh).toFixed(2)} + insurance ${toCurrency(insurancePerFlight)} = ${toCurrency(lineCost)}`,
       )
     })
 
@@ -2222,7 +2767,7 @@ function App() {
       form.crewCostCabinDays * form.crewCostCabinDkkPerDay +
       form.crewCostCabinSdDays * form.crewCostCabinSdDkkPerDay
     const ownAddOns =
-      (form.ownIncludeScaExtraHotac ? ownScaExtraHotacDkk : 0) +
+      (form.ownIncludeScaExtraHotac ? adhocHotacDkk : 0) +
       (form.ownIncludeScaExtraCrewPerDiem ? ownScaExtraCrewPerDiemEur * form.eurToDkkRate : 0)
     const baseTotalDkk = operatingCost + crewCost + ownAddOns
     const marginMultiplier = 1 + Math.max(0, form.adhocSafetyMarginPercent) / 100
@@ -2233,9 +2778,24 @@ function App() {
     const minimumBlhEur = form.eurToDkkRate > 0 ? minimumBlhDkk / form.eurToDkkRate : 0
 
     details.push(`Operating cost (full DOC, all elements included): ${toCurrency(operatingCost)}`)
+    details.push(
+      form.adhocUseFuelCorrection
+        ? `Fuel correction factor = current/reference (USD/MT): ${form.adhocFuelPriceCurrent.toFixed(2)} / ${form.adhocFuelPriceBasicRef.toFixed(2)} = ${fuelCorrectionFactor.toFixed(3)}`
+        : 'Fuel correction disabled (factor = 1.000)',
+    )
+    details.push(
+      `Adhoc variable DOC per BLH (fuel adjusted): non-fuel ${toCurrency(nonFuelPerBlh)} + fuel ${toCurrency(fuelPerBlh)} * factor ${fuelCorrectionFactor.toFixed(3)} = ${toCurrency(adjustedDocPerBlh)}`,
+    )
+    details.push(
+      `Adhoc fixed baseline per BLH: ownership + maintenance = ${toCurrency(ownershipAndMaintPerBlh)}; insurance per flight: ${toCurrency(insurancePerFlight)}`,
+    )
     details.push(`Crew cost contribution: ${toCurrency(crewCost)}`)
     details.push(`SCA add-ons contribution: ${toCurrency(ownAddOns)}`)
-    details.push(`Safety margin: ${form.adhocSafetyMarginPercent.toFixed(0)}%`)
+    details.push(
+      `Crew per Diem setup: ${form.adhocCrewPerDiemOperatingDays} days * ${getCrewPerDiemRateEurPerDay(adhocAircraft)} EUR/day`,
+    )
+    details.push(`HOTAC setup: ${form.adhocHotacNights} nights * ${getHotacRateDkkPerNight(adhocAircraft)} DKK/night`)
+    details.push(`Adhoc profit: ${form.adhocSafetyMarginPercent.toFixed(0)}%`)
 
     return {
       totalBlh,
@@ -2248,11 +2808,17 @@ function App() {
       details,
     }
   }, [
+    baselineByAircraft,
     ownBlhDefaults,
     ownDocPerBlhByAircraft,
     enabledAdhocLines,
+    form.adhocFuelPriceBasicRef,
+    form.adhocFuelPriceCurrent,
     form.adhocSafetyMarginPercent,
     form.adhocAircraft,
+    form.adhocCrewPerDiemOperatingDays,
+    form.adhocHotacNights,
+    form.adhocUseFuelCorrection,
     form.crewCostCabinDays,
     form.crewCostCabinDkkPerDay,
     form.crewCostCabinSdDays,
@@ -2265,55 +2831,51 @@ function App() {
     form.eurToDkkRate,
     form.ownIncludeScaExtraCrewPerDiem,
     form.ownIncludeScaExtraHotac,
-    form.ownScaExtraCrewPerDiemEur,
     form.ownScaExtraHotacDkk,
     selectedOriginalType,
   ])
 
-  function composeAcmiInternalEmail() {
+  async function sendAcmiInternalEmail() {
     if (!acmiBreakdown) return
     const aircraft = form.acmiAircraft || selectedOriginalType
     const flightNumbers = form.acmiLines
       .filter((line) => line.enabled && line.flightNumber.trim().length > 0)
       .map((line) => line.flightNumber.trim())
-    const flightRef = flightNumbers.length > 0 ? flightNumbers.join('/') : '[FLTNO]'
-    const dateRef = formatSubjectDate(form.navblueFlightDate)
-    const subject = `ACMI Offer ${flightRef} ${dateRef}`
+    const flightRef = flightNumbers.length > 0 ? flightNumbers.join('/') : ''
+    const startDateRef = getModuleStartDateForSubject(form.acmiLines)
+    const subject = flightRef ? `ACMI Offer ${flightRef} ${startDateRef}` : `ACMI Offer ${startDateRef}`
     const crewFcCost = form.crewCostFcDays * form.crewCostFcDkkPerDay
     const crewFoCost = form.crewCostFoDays * form.crewCostFoDkkPerDay
     const crewCabinCost = form.crewCostCabinDays * form.crewCostCabinDkkPerDay
     const crewCabinSdCost = form.crewCostCabinSdDays * form.crewCostCabinSdDkkPerDay
     const crewTotal = crewFcCost + crewFoCost + crewCabinCost + crewCabinSdCost
     const acmiAircraft = (form.acmiAircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+    const acmiHotacDkkFromNights = form.acmiHotacNights * getHotacRateDkkPerNight(acmiAircraft)
+    const acmiCrewPerDiemEur = form.acmiCrewPerDiemOperatingDays * getCrewPerDiemRateEurPerDay(acmiAircraft)
     const acmiOperatingCost = enabledAcmiLines.reduce((sum, line) => {
       const blh = derivePositioningBlh(line) || ownBlhDefaults[acmiAircraft]
       return sum + blh * acmiDocPerBlhByAircraft[acmiAircraft]
     }, 0)
     const acmiAddOns =
-      (form.ownIncludeScaExtraHotac ? (typeof form.ownScaExtraHotacDkk === 'number' ? form.ownScaExtraHotacDkk : 0) : 0) +
-      (form.ownIncludeScaExtraCrewPerDiem
-        ? (typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0) * form.eurToDkkRate
-        : 0)
-    const acmiHotacDkk = form.ownIncludeScaExtraHotac ? (typeof form.ownScaExtraHotacDkk === 'number' ? form.ownScaExtraHotacDkk : 0) : 0
-    const acmiCrewPerDiemDkk = form.ownIncludeScaExtraCrewPerDiem
-      ? (typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0) * form.eurToDkkRate
-      : 0
-    const routingRows = buildModuleRoutingRows(form.acmiLines, 'ACMI')
-    openEmailDraft(subject, [
+      (form.ownIncludeScaExtraHotac ? acmiHotacDkkFromNights : 0) +
+      (form.ownIncludeScaExtraCrewPerDiem ? acmiCrewPerDiemEur * form.eurToDkkRate : 0)
+    const acmiProfitPercent = Math.max(20, form.acmiSafetyMarginPercent)
+    const acmiHotacDkk = form.ownIncludeScaExtraHotac ? acmiHotacDkkFromNights : 0
+    const acmiCrewPerDiemDkk = form.ownIncludeScaExtraCrewPerDiem ? acmiCrewPerDiemEur * form.eurToDkkRate : 0
+    const acmiTotalEur = form.eurToDkkRate > 0 ? acmiBreakdown.totalCostDkk / form.eurToDkkRate : 0
+    const roundedBlhRateEur = Math.round(acmiBreakdown.totalBlh > 0 ? acmiTotalEur / acmiBreakdown.totalBlh : 0)
+    const routingTable = buildModuleRoutingTableLines(form.acmiLines, 'ACMI')
+    const startDateText = getModuleStartDateText(form.acmiLines)
+    const delivery = await openEmailDraftToRecipients(subject, [
       'Hello,',
       '',
       'ACMI OFFER - PRICE DETAILS',
-      kvLine('Flight date:', withFallback(form.navblueFlightDate, 'Flight date')),
+      kvLine('Start date:', startDateText),
       kvLine('Aircraft type:', aircraft),
       kvLine('EUR/DKK rate:', form.eurToDkkRate.toFixed(2)),
       '',
       'ROUTING',
-      ...(routingRows.length === 0
-        ? ['No active legs yet']
-        : routingRows.map(
-            (row, idx) =>
-              `${idx + 1}) ${row.flightNumber}  ${row.from}-${row.to}  STD ${row.std}  STA ${row.sta}  BLH ${row.blh}`,
-          )),
+      ...routingTable,
       '',
       'SCA CREW COSTS (DKK)',
       kvLine('FC:', `${form.crewCostFcDays} days * ${toCurrency(form.crewCostFcDkkPerDay)} = ${toCurrency(crewFcCost)}`),
@@ -2329,103 +2891,110 @@ function App() {
       kvLine('Operating:', toCurrency(acmiOperatingCost)),
       kvLine('Crew:', toCurrency(crewTotal)),
       kvLine('HOTAC:', toCurrency(acmiHotacDkk)),
+      kvLine('HOTAC setup:', `${form.acmiHotacNights} nights * ${toCurrency(getHotacRateDkkPerNight(acmiAircraft))}/night`),
       kvLine('Crew per diem:', toCurrency(acmiCrewPerDiemDkk)),
       kvLine('Add-ons total:', toCurrency(acmiAddOns)),
       kvLine('Subtotal before margin:', toCurrency(acmiBreakdown.baseCostDkk)),
-      kvLine(`Margin (${form.acmiSafetyMarginPercent.toFixed(0)}%):`, toCurrency(acmiBreakdown.marginDkk)),
+      kvLine(`Margin (${acmiProfitPercent.toFixed(0)}%):`, toCurrency(acmiBreakdown.marginDkk)),
       kvLine('TOTAL:', toCurrency(acmiBreakdown.totalCostDkk)),
       '',
       'PRICE',
-      kvLine('Total EUR:', toEur(form.eurToDkkRate > 0 ? acmiBreakdown.totalCostDkk / form.eurToDkkRate : 0)),
-      kvLine('Min BLH DKK:', toCurrency(acmiBreakdown.minimumBlhDkk)),
-      kvLine('Min BLH EUR:', toEur(acmiBreakdown.minimumBlhEur)),
-      kvLine('Total BLH:', acmiBreakdown.totalBlh.toFixed(2)),
+      kvLine('Total EUR:', toEur(acmiTotalEur)),
+      kvLine('Minimum BLH:', `${acmiBreakdown.totalBlh.toFixed(2)} BLH`),
+      kvLine('BLH rate (EUR/hour):', toEur(roundedBlhRateEur)),
       '',
       'CALCULATION TRACE',
       ...acmiBreakdown.details.map((line) => `- ${line}`),
-      '',
-      'Fields marked with [] can be completed manually if missing.',
-    ])
+    ], form.acmiEmailRecipients)
+    if (delivery.cancelled) return
+    window.alert('Mail sent.')
+    setForm((prev) => ({ ...prev, acmiEmailRecipients: '' }))
   }
 
-  function composeAcmiCustomerEmail() {
+  async function sendAcmiCustomerEmail() {
     if (!acmiBreakdown) return
     const aircraft = form.acmiAircraft || selectedOriginalType
     const flightNumbers = form.acmiLines
       .filter((line) => line.enabled && line.flightNumber.trim().length > 0)
       .map((line) => line.flightNumber.trim())
-    const flightRef = flightNumbers.length > 0 ? flightNumbers.join('/') : '[FLTNO]'
-    const dateRef = formatSubjectDate(form.navblueFlightDate)
-    const subject = `ACMI Offer ${flightRef} ${dateRef}`
-    const routingRows = buildModuleRoutingRows(form.acmiLines, 'ACMI')
-    openEmailDraft(subject, [
+    const flightRef = flightNumbers.length > 0 ? flightNumbers.join('/') : ''
+    const startDateRef = getModuleStartDateForSubject(form.acmiLines)
+    const subject = flightRef ? `ACMI Offer ${flightRef} ${startDateRef}` : `ACMI Offer ${startDateRef}`
+    const roundedClientDkk = roundUpToNearestHundred(acmiBreakdown.totalCostDkk)
+    const roundedClientEur = roundUpToNearestHundred(form.eurToDkkRate > 0 ? acmiBreakdown.totalCostDkk / form.eurToDkkRate : 0)
+    const roundedBlhRateEur = Math.round(acmiBreakdown.totalBlh > 0 ? roundedClientEur / acmiBreakdown.totalBlh : 0)
+    const routingTable = buildModuleRoutingTableLines(form.acmiLines, 'ACMI')
+    const startDateText = getModuleStartDateText(form.acmiLines)
+    const delivery = await openEmailDraftToRecipients(subject, [
       'Hello,',
       '',
       'Please find the ACMI proposal below.',
       '',
-      kvLine('Flight date:', withFallback(form.navblueFlightDate, 'Flight date')),
+      kvLine('Start date:', startDateText),
       kvLine('Aircraft type:', aircraft),
       '',
       'ROUTING',
-      ...(routingRows.length === 0
-        ? ['No active legs yet']
-        : routingRows.map(
-            (row, idx) =>
-              `${idx + 1}) ${row.flightNumber}  ${row.from}-${row.to}  STD ${row.std}  STA ${row.sta}  BLH ${row.blh}`,
-          )),
+      ...routingTable,
       '',
       'PRICE',
-      kvLine('Total DKK:', toCurrency(acmiBreakdown.totalCostDkk)),
-      kvLine('Total EUR:', toEur(form.eurToDkkRate > 0 ? acmiBreakdown.totalCostDkk / form.eurToDkkRate : 0)),
-      '',
-      'Fields marked with [] can be completed manually if missing.',
-    ])
+      kvLine('Total DKK:', toCurrency(roundedClientDkk)),
+      kvLine('Total EUR:', toEur(roundedClientEur)),
+      kvLine('Minimum BLH:', `${acmiBreakdown.totalBlh.toFixed(2)} BLH`),
+      kvLine('BLH rate (EUR/hour):', toEur(roundedBlhRateEur)),
+    ], form.acmiEmailRecipients)
+    if (delivery.cancelled) return
+    window.alert('Mail sent.')
+    setForm((prev) => ({ ...prev, acmiEmailRecipients: '' }))
   }
 
-  function composeAdhocInternalEmail() {
+  async function sendAdhocInternalEmail() {
     if (!adhocBreakdown) return
     const aircraft = form.adhocAircraft || selectedOriginalType
     const flightNumbers = form.adhocLines
       .filter((line) => line.enabled && line.flightNumber.trim().length > 0)
       .map((line) => line.flightNumber.trim())
     const flightRef = flightNumbers.length > 0 ? flightNumbers.join('/') : '[FLTNO]'
-    const dateRef = formatSubjectDate(form.navblueFlightDate)
-    const subject = `Adhoc Offer ${flightRef} ${dateRef}`
+    const startDateRef = getModuleStartDateForSubject(form.adhocLines)
+    const subject = `Adhoc Offer ${flightRef} ${startDateRef}`
     const crewFcCost = form.crewCostFcDays * form.crewCostFcDkkPerDay
     const crewFoCost = form.crewCostFoDays * form.crewCostFoDkkPerDay
     const crewCabinCost = form.crewCostCabinDays * form.crewCostCabinDkkPerDay
     const crewCabinSdCost = form.crewCostCabinSdDays * form.crewCostCabinSdDkkPerDay
     const crewTotal = crewFcCost + crewFoCost + crewCabinCost + crewCabinSdCost
     const adhocAircraft = (form.adhocAircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+    const adhocCrewPerDiemEur = form.adhocCrewPerDiemOperatingDays * getCrewPerDiemRateEurPerDay(adhocAircraft)
+    const adhocHotacDkkFromNights = form.adhocHotacNights * getHotacRateDkkPerNight(adhocAircraft)
+    const adhocFuelPerBlh = baselineByAircraft[adhocAircraft].componentsPerBlh.fuel ?? 0
+    const adhocNonFuelPerBlh = Math.max(0, ownDocPerBlhByAircraft[adhocAircraft] - adhocFuelPerBlh)
+    const adhocOwnershipAndMaintPerBlh =
+      baselineByAircraft[adhocAircraft].ownershipCostPerBlh + baselineByAircraft[adhocAircraft].maintenanceFixedPerBlh
+    const adhocInsurancePerFlight = baselineByAircraft[adhocAircraft].insurancePerFlight
+    const adhocFuelCorrectionFactor = form.adhocUseFuelCorrection
+      ? getFuelCorrectionFactor(form.adhocFuelPriceCurrent, form.adhocFuelPriceBasicRef)
+      : 1
+    const adhocAdjustedDocPerBlh = adhocNonFuelPerBlh + adhocFuelPerBlh * adhocFuelCorrectionFactor
     const adhocOperatingCost = enabledAdhocLines.reduce((sum, line) => {
       const blh = derivePositioningBlh(line) || ownBlhDefaults[adhocAircraft]
-      return sum + blh * ownDocPerBlhByAircraft[adhocAircraft]
+      return sum + blh * adhocAdjustedDocPerBlh + blh * adhocOwnershipAndMaintPerBlh + adhocInsurancePerFlight
     }, 0)
     const adhocAddOns =
-      (form.ownIncludeScaExtraHotac ? (typeof form.ownScaExtraHotacDkk === 'number' ? form.ownScaExtraHotacDkk : 0) : 0) +
-      (form.ownIncludeScaExtraCrewPerDiem
-        ? (typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0) * form.eurToDkkRate
-        : 0)
-    const adhocHotacDkk = form.ownIncludeScaExtraHotac ? (typeof form.ownScaExtraHotacDkk === 'number' ? form.ownScaExtraHotacDkk : 0) : 0
-    const adhocCrewPerDiemDkk = form.ownIncludeScaExtraCrewPerDiem
-      ? (typeof form.ownScaExtraCrewPerDiemEur === 'number' ? form.ownScaExtraCrewPerDiemEur : 0) * form.eurToDkkRate
-      : 0
-    const routingRows = buildModuleRoutingRows(form.adhocLines, 'Adhoc')
-    openEmailDraft(subject, [
+      (form.ownIncludeScaExtraHotac ? adhocHotacDkkFromNights : 0) +
+      (form.ownIncludeScaExtraCrewPerDiem ? adhocCrewPerDiemEur * form.eurToDkkRate : 0)
+    const adhocHotacDkk = form.ownIncludeScaExtraHotac ? adhocHotacDkkFromNights : 0
+    const adhocCrewPerDiemDkk = form.ownIncludeScaExtraCrewPerDiem ? adhocCrewPerDiemEur * form.eurToDkkRate : 0
+    const routingTable = buildModuleRoutingTableLines(form.adhocLines, 'Adhoc')
+    const startDateText = getModuleStartDateText(form.adhocLines)
+    const adhocSignature = ['__SIGNATURE_SPACER__', 'Kind regards,', 'Jakob']
+    const delivery = await openEmailDraftToRecipients(subject, [
       'Hello,',
       '',
       'ADHOC OFFER - PRICE DETAILS',
-      kvLine('Flight date:', withFallback(form.navblueFlightDate, 'Flight date')),
+      kvLine('Start date:', startDateText),
       kvLine('Aircraft type:', aircraft),
       kvLine('EUR/DKK rate:', form.eurToDkkRate.toFixed(2)),
       '',
       'ROUTING',
-      ...(routingRows.length === 0
-        ? ['No active legs yet']
-        : routingRows.map(
-            (row, idx) =>
-              `${idx + 1}) ${row.flightNumber}  ${row.from}-${row.to}  STD ${row.std}  STA ${row.sta}  BLH ${row.blh}`,
-          )),
+      ...routingTable,
       '',
       'SCA CREW COSTS (DKK)',
       kvLine('FC:', `${form.crewCostFcDays} days * ${toCurrency(form.crewCostFcDkkPerDay)} = ${toCurrency(crewFcCost)}`),
@@ -2439,8 +3008,15 @@ function App() {
       '',
       'COST SUMMARY (DKK)',
       kvLine('Operating:', toCurrency(adhocOperatingCost)),
+      kvLine(
+        'Fuel correction factor:',
+        form.adhocUseFuelCorrection
+          ? `${form.adhocFuelPriceCurrent.toFixed(2)} / ${form.adhocFuelPriceBasicRef.toFixed(2)} = ${adhocFuelCorrectionFactor.toFixed(3)} (USD/MT)`
+          : 'Disabled (1.000)',
+      ),
       kvLine('Crew:', toCurrency(crewTotal)),
       kvLine('HOTAC:', toCurrency(adhocHotacDkk)),
+      kvLine('HOTAC setup:', `${form.adhocHotacNights} nights * ${toCurrency(getHotacRateDkkPerNight(adhocAircraft))}/night`),
       kvLine('Crew per diem:', toCurrency(adhocCrewPerDiemDkk)),
       kvLine('Add-ons total:', toCurrency(adhocAddOns)),
       kvLine('Subtotal before margin:', toCurrency(adhocBreakdown.totalCostDkk)),
@@ -2455,43 +3031,92 @@ function App() {
       '',
       'CALCULATION TRACE',
       ...adhocBreakdown.details.map((line) => `- ${line}`),
-      '',
-      'Fields marked with [] can be completed manually if missing.',
-    ])
+    ], form.adhocEmailRecipients, adhocSignature)
+    if (delivery.cancelled) return
+    window.alert('Mail sent.')
+    setForm((prev) => ({ ...prev, adhocEmailRecipients: '' }))
   }
 
-  function composeAdhocCustomerEmail() {
+  async function sendAdhocCustomerEmail() {
     if (!adhocBreakdown) return
     const aircraft = form.adhocAircraft || selectedOriginalType
     const flightNumbers = form.adhocLines
       .filter((line) => line.enabled && line.flightNumber.trim().length > 0)
       .map((line) => line.flightNumber.trim())
     const flightRef = flightNumbers.length > 0 ? flightNumbers.join('/') : '[FLTNO]'
-    const dateRef = formatSubjectDate(form.navblueFlightDate)
-    const subject = `Adhoc Offer ${flightRef} ${dateRef}`
-    const routingRows = buildModuleRoutingRows(form.adhocLines, 'Adhoc')
-    openEmailDraft(subject, [
-      'Hello,',
+    const startDateRef = getModuleStartDateForSubject(form.adhocLines)
+    const subject = `Adhoc Offer ${flightRef} ${startDateRef}`
+    const roundedClientDkk = roundUpToNearestHundred(adhocBreakdown.minimumTotalDkk)
+    const roundedClientEur = roundUpToNearestHundred(adhocBreakdown.minimumTotalEur)
+    const routingTable = buildModuleRoutingTableLines(form.adhocLines, 'Adhoc')
+    const startDateText = getModuleStartDateText(form.adhocLines)
+    const seatTextByAircraft: Record<'A321' | 'A321N' | 'A339', string> = {
+      A321: '212 seats',
+      A321N: '218 seats',
+      A339: '373 seats',
+    }
+    const paxTextByAircraft: Record<'A321' | 'A321N' | 'A339', string> = {
+      A321: '212',
+      A321N: '218',
+      A339: '373',
+    }
+    const adhocAircraft = (form.adhocAircraft || selectedOriginalType) as Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'>
+    const aircraftSeatsText = seatTextByAircraft[adhocAircraft]
+    const paxBasisText = paxTextByAircraft[adhocAircraft]
+    const isDanishOffer = form.adhocOfferSendInDanish
+    const fuelPriceUsdPerMt = Math.round(estimateUsdPerMtFromDkkPerLiter(form.adhocFuelPriceCurrent, form.eurToDkkRate))
+    const adhocFuelPerBlhDkk = baselineByAircraft[adhocAircraft].componentsPerBlh.fuel ?? 0
+    const adhocFuelCorrectionFactor = form.adhocUseFuelCorrection
+      ? getFuelCorrectionFactor(form.adhocFuelPriceCurrent, form.adhocFuelPriceBasicRef)
+      : 1
+    const estimatedFuelConsumptionMt = estimateFuelConsumptionMt(
+      adhocBreakdown.totalBlh,
+      adhocFuelPerBlhDkk,
+      adhocFuelCorrectionFactor,
+      fuelPriceUsdPerMt,
+      form.eurToDkkRate,
+    )
+    const estimatedFuelConsumptionMtText = estimatedFuelConsumptionMt > 0 ? estimatedFuelConsumptionMt.toFixed(2) : '0.00'
+    const paxBasedPriceLine = isDanishOffer
+      ? kvLine('Totalpris DKK:', `${toCurrency(roundedClientDkk)}, baseret på ${paxBasisText} pax`)
+      : kvLine('Total Price EUR:', `${toEur(roundedClientEur)}, based on ${paxBasisText} pax`)
+    const adhocSignature = ['__SIGNATURE_SPACER__', 'Kind regards,', 'Jakob']
+    const delivery = await openEmailDraftToRecipients(subject, [
+      isDanishOffer ? 'Hej,' : 'Hello,',
       '',
-      'Please find the Adhoc proposal below.',
+      isDanishOffer ? 'Nedenfor finder du Adhoc-tilbuddet.' : 'Please find the Adhoc proposal below.',
       '',
-      kvLine('Flight date:', withFallback(form.navblueFlightDate, 'Flight date')),
-      kvLine('Aircraft type:', aircraft),
+      kvLine(isDanishOffer ? 'Startdato:' : 'Start date:', startDateText),
+      kvLine(isDanishOffer ? 'Aircraft type:' : 'Aircraft type:', `${aircraft} (${aircraftSeatsText})`),
+      '',
+      isDanishOffer ? 'Alle tider er UTC og med forbehold for slot tider.' : 'All times UTC and subject to slots.',
       '',
       'ROUTING',
-      ...(routingRows.length === 0
-        ? ['No active legs yet']
-        : routingRows.map(
-            (row, idx) =>
-              `${idx + 1}) ${row.flightNumber}  ${row.from}-${row.to}  STD ${row.std}  STA ${row.sta}  BLH ${row.blh}`,
-          )),
+      ...routingTable,
       '',
-      'PRICE',
-      kvLine('Total DKK:', toCurrency(adhocBreakdown.minimumTotalDkk)),
-      kvLine('Total EUR:', toEur(adhocBreakdown.minimumTotalEur)),
+      isDanishOffer ? 'PRIS' : 'PRICE',
+      paxBasedPriceLine,
       '',
-      'Fields marked with [] can be completed manually if missing.',
-    ])
+      isDanishOffer
+        ? `Fuelomkostningen i dette tilbud er fastsat ved en fuelpris på USD ${fuelPriceUsdPerMt}/MT og et samlet forbrug på ${estimatedFuelConsumptionMtText} MT, inklusive tomflyvninger. Afviger den faktiske fuelomkostning med mere end +/-5 % i forhold til det beregnede niveau, foretages en efterregulering.`
+        : `The fuel cost in this offer is based on a fuel price of USD ${fuelPriceUsdPerMt}/MT and an estimated fuel consumption of ${estimatedFuelConsumptionMtText} MT, including ferry flights. If the actual fuel cost deviates by more than +/-5% from the estimate, a fuel cost reconciliation shall apply.`,
+      '',
+      isDanishOffer
+        ? 'Efterreguleringen beregnes som forskellen mellem den i tilbuddet anvendte fuelomkostning og fuelomkostningen pr. dato for første liveflyvning, baseret på Platts Global Index samt det estimerede samlede forbrug. Reguleringen vil gælde for det fulde program, inkl. tomflyvninger.'
+        : 'The reconciliation is calculated as the difference between the fuel cost applied in this offer and the fuel cost at the date of first live flight, based on the Platts Global Index and the estimated total consumption. The reconciliation applies to the full flight program, including ferry flights.',
+      '',
+      isDanishOffer ? 'Charterprisen inkluderer:' : 'The charter price includes:',
+      isDanishOffer ? '- 10 % kommission.' : '- All known taxes and fees.',
+      isDanishOffer ? '- Alle kendte skatter og afgifter.' : '- Standard catering served with coffee, tea, and soft drinks.',
+      ...(isDanishOffer ? ['- Standard catering, serveret med kaffe, te og soft drinks.'] : []),
+      '',
+      isDanishOffer
+        ? 'Vort tilbud er altid med forbehold for crew og kapacitet til endelig bekræftelse.'
+        : 'This offer is subject to crew, capacity and prior sales until final confirmation.',
+    ], form.adhocEmailRecipients, adhocSignature)
+    if (delivery.cancelled) return
+    window.alert('Mail sent.')
+    setForm((prev) => ({ ...prev, adhocEmailRecipients: '' }))
   }
 
   function composeMainToolEmail() {
@@ -2522,7 +3147,7 @@ function App() {
       ...result.details.map((line) => `  - ${line}`),
     ])
 
-    openEmailDraft(subject, [
+    openEmailDraftToRecipients(subject, [
       'Hello,',
       '',
       'Main tool scenario setup and option comparison.',
@@ -2547,11 +3172,24 @@ function App() {
       ...optionDetails,
       '',
       'Fields marked with [] can be completed manually if missing.',
-    ])
+    ], '')
+  }
+
+  async function submitEmailConfirm() {
+    if (!emailConfirmState) return
+    const action = emailConfirmState.type
+    setEmailConfirmState(null)
+    if (action === 'acmi-internal') await sendAcmiInternalEmail()
+    if (action === 'acmi-client') await sendAcmiCustomerEmail()
+    if (action === 'adhoc-internal') await sendAdhocInternalEmail()
+    if (action === 'adhoc-client') await sendAdhocCustomerEmail()
   }
 
   useEffect(() => {
-    if (isToolMode || !form.originalType || results.length === 0 || routeLegsWithStations.length === 0) return
+    if (isToolMode || !form.originalType || results.length === 0 || routeLegsWithStations.length === 0) {
+      clearHistoryDebounce('main')
+      return
+    }
     const routeSignature = routeLegsWithStations
       .map(({ key, leg }) => `${leg.from}-${leg.to}-${leg.depUtc}-${leg.arrUtc}-${routeLegHoursByKey[key] ?? 0}`)
       .join('|')
@@ -2561,38 +3199,68 @@ function App() {
       .join('|')
     const signature = `main:${form.originalType}:${routeSignature}:${resultSignature}`
     const topOptions = results.slice(0, 3).map((result) => `${result.name}: ${toSignedDkkDelta(result.evaluatedTotalDkk)}`)
-    pushScenarioHistory('main', signature, 'Main Tool', [
-      `Original type: ${form.originalType}`,
-      `Route legs: ${routeLegsWithStations.length}`,
-      `Best option: ${results[0].name} (${toSignedDkkDelta(results[0].evaluatedTotalDkk)})`,
-      ...topOptions,
-    ])
+    debounceHistoryPush('main', () =>
+      pushScenarioHistory('main', signature, 'Main Tool', [
+        `Original type: ${form.originalType}`,
+        `Route legs: ${routeLegsWithStations.length}`,
+        `Best option: ${results[0].name} (${toSignedDkkDelta(results[0].evaluatedTotalDkk)})`,
+        ...topOptions,
+      ]),
+    )
   }, [form.originalType, isToolMode, results, routeLegHoursByKey, routeLegsWithStations])
 
   useEffect(() => {
-    if (!form.enableAcmiModule || !acmiBreakdown) return
+    if (!form.enableAcmiModule || !acmiBreakdown) {
+      clearHistoryDebounce('acmi')
+      return
+    }
+    const enabledLines = form.acmiLines.filter((line) => line.enabled)
+    if (enabledLines.length === 0) {
+      clearHistoryDebounce('acmi')
+      return
+    }
+    if (!enabledLines.every((line) => isModuleLineComplete(line))) {
+      clearHistoryDebounce('acmi')
+      return
+    }
     const routing = buildModuleRoutingOverview(form.acmiLines, 'ACMI')
-    const signature = `acmi:${form.acmiAircraft || selectedOriginalType}:${form.acmiSafetyMarginPercent}:${routing.join('|')}:${Math.round(acmiBreakdown.totalCostDkk)}`
-    pushScenarioHistory('acmi', signature, 'ACMI Tool', [
-      `Aircraft: ${form.acmiAircraft || selectedOriginalType}`,
-      `Total BLH: ${acmiBreakdown.totalBlh.toFixed(2)}`,
-      `Total price: ${toCurrency(acmiBreakdown.totalCostDkk)} / ${toEur(form.eurToDkkRate > 0 ? acmiBreakdown.totalCostDkk / form.eurToDkkRate : 0)}`,
-      `Margin: ${toCurrency(acmiBreakdown.marginDkk)} (${form.acmiSafetyMarginPercent.toFixed(0)}%)`,
-      ...routing,
-    ])
+    const signature = `acmi:${form.acmiAircraft || selectedOriginalType}:${routing.join('|')}`
+    debounceHistoryPush('acmi', () =>
+      pushScenarioHistory('acmi', signature, 'ACMI Tool', [
+        `Aircraft: ${form.acmiAircraft || selectedOriginalType}`,
+        `Total BLH: ${acmiBreakdown.totalBlh.toFixed(2)}`,
+        `Total price: ${toCurrency(acmiBreakdown.totalCostDkk)} / ${toEur(form.eurToDkkRate > 0 ? acmiBreakdown.totalCostDkk / form.eurToDkkRate : 0)}`,
+        `Margin: ${toCurrency(acmiBreakdown.marginDkk)} (${form.acmiSafetyMarginPercent.toFixed(0)}%)`,
+        ...routing,
+      ]),
+    )
   }, [acmiBreakdown, form.acmiAircraft, form.acmiLines, form.acmiSafetyMarginPercent, form.enableAcmiModule, form.eurToDkkRate, selectedOriginalType])
 
   useEffect(() => {
-    if (!form.enableAdhocModule || !adhocBreakdown) return
+    if (!form.enableAdhocModule || !adhocBreakdown) {
+      clearHistoryDebounce('adhoc')
+      return
+    }
+    const enabledLines = form.adhocLines.filter((line) => line.enabled)
+    if (enabledLines.length === 0) {
+      clearHistoryDebounce('adhoc')
+      return
+    }
+    if (!enabledLines.every((line) => isModuleLineComplete(line))) {
+      clearHistoryDebounce('adhoc')
+      return
+    }
     const routing = buildModuleRoutingOverview(form.adhocLines, 'Adhoc')
-    const signature = `adhoc:${form.adhocAircraft || selectedOriginalType}:${form.adhocSafetyMarginPercent}:${routing.join('|')}:${Math.round(adhocBreakdown.minimumTotalDkk)}`
-    pushScenarioHistory('adhoc', signature, 'Adhoc Tool', [
-      `Aircraft: ${form.adhocAircraft || selectedOriginalType}`,
-      `Total BLH: ${adhocBreakdown.totalBlh.toFixed(2)}`,
-      `Total price: ${toCurrency(adhocBreakdown.minimumTotalDkk)} / ${toEur(adhocBreakdown.minimumTotalEur)}`,
-      `Margin: ${toCurrency(adhocBreakdown.marginDkk)} (${form.adhocSafetyMarginPercent.toFixed(0)}%)`,
-      ...routing,
-    ])
+    const signature = `adhoc:${form.adhocAircraft || selectedOriginalType}:${routing.join('|')}`
+    debounceHistoryPush('adhoc', () =>
+      pushScenarioHistory('adhoc', signature, 'Adhoc Tool', [
+        `Aircraft: ${form.adhocAircraft || selectedOriginalType}`,
+        `Total BLH: ${adhocBreakdown.totalBlh.toFixed(2)}`,
+        `Total price: ${toCurrency(adhocBreakdown.minimumTotalDkk)} / ${toEur(adhocBreakdown.minimumTotalEur)}`,
+        `Margin: ${toCurrency(adhocBreakdown.marginDkk)} (${form.adhocSafetyMarginPercent.toFixed(0)}%)`,
+        ...routing,
+      ]),
+    )
   }, [
     adhocBreakdown,
     form.adhocAircraft,
@@ -2601,6 +3269,15 @@ function App() {
     form.enableAdhocModule,
     selectedOriginalType,
   ])
+
+  useEffect(
+    () => () => {
+      clearHistoryDebounce('main')
+      clearHistoryDebounce('acmi')
+      clearHistoryDebounce('adhoc')
+    },
+    [],
+  )
 
   function getFallbackAircraftForAudit(aircraft: AircraftType): Exclude<AircraftType, 'SUB Narrowbody' | 'SUB Widebody'> {
     if (aircraft === 'SUB Widebody') return 'A339'
@@ -2722,6 +3399,7 @@ function App() {
                 value={form.eurToDkkRate}
                 onChange={(event) => update('eurToDkkRate', Number(event.target.value) || 0)}
               />
+              {eurRateFetchMeta ? <span className="top-rate-meta">({eurRateFetchMeta})</span> : null}
             </label>
             <button type="button" className="reset-btn" onClick={resetAll}>
               Reset all fields
@@ -2736,6 +3414,12 @@ function App() {
                 type="password"
                 value={adminPasswordInput}
                 onChange={(event) => setAdminPasswordInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    submitAdminAccess()
+                  }
+                }}
                 placeholder="Enter admin password"
                 autoFocus
               />
@@ -2750,6 +3434,29 @@ function App() {
                     setAdminPasswordInput('')
                   }}
                 >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+        {emailConfirmState ? (
+          <div className="admin-modal-backdrop">
+            <div className="admin-modal-card">
+              <h4>Confirm send</h4>
+              <p>
+                {emailConfirmState.type === 'acmi-internal' || emailConfirmState.type === 'adhoc-internal'
+                  ? 'Are you sure you want to send price details (INTERNAL ONLY) to:'
+                  : 'Are you sure you want to send offer to:'}
+              </p>
+              <p>
+                <strong>{emailConfirmState.recipients || '[no recipients entered]'}</strong>
+              </p>
+              <div className="admin-modal-actions">
+                <button type="button" onClick={submitEmailConfirm}>
+                  Confirm
+                </button>
+                <button type="button" onClick={() => setEmailConfirmState(null)}>
                   Cancel
                 </button>
               </div>
@@ -3155,20 +3862,20 @@ function App() {
                   value={form.leg1.depUtc}
                   onChange={(event) => updateLeg('leg1', 'depUtc', event.target.value)}
                   placeholder="STD"
-                  disabled={form.leg1.blh.trim().length > 0 || routeCityPairBlhByLeg.leg1.trim().length > 0}
+                  disabled={form.leg1.blh.trim().length > 0}
                 />
                 <input
                   value={form.leg1.arrUtc}
                   onChange={(event) => updateLeg('leg1', 'arrUtc', event.target.value)}
                   placeholder="STA"
-                  disabled={form.leg1.blh.trim().length > 0 || routeCityPairBlhByLeg.leg1.trim().length > 0}
+                  disabled={form.leg1.blh.trim().length > 0}
                 />
                 <span>OR</span>
                 <input
-                  value={form.leg1.blh}
+                  value={getRouteLegBlhDisplayValue('leg1')}
                   onChange={(event) => updateLeg('leg1', 'blh', event.target.value)}
-                  placeholder="BLH HH:MM"
-                  disabled={hasStationsAndTimes(form.leg1) || routeCityPairBlhByLeg.leg1.trim().length > 0}
+                  placeholder={routeCityPairLoadingByLeg.leg1 ? 'Loading...' : 'BLH HH:MM'}
+                  disabled={hasStationsAndTimes(form.leg1)}
                 />
                 <input
                   type="text"
@@ -3216,20 +3923,20 @@ function App() {
                   value={form.leg2.depUtc}
                   onChange={(event) => updateLeg('leg2', 'depUtc', event.target.value)}
                   placeholder="STD"
-                  disabled={form.leg2.blh.trim().length > 0 || routeCityPairBlhByLeg.leg2.trim().length > 0}
+                  disabled={form.leg2.blh.trim().length > 0}
                 />
                 <input
                   value={form.leg2.arrUtc}
                   onChange={(event) => updateLeg('leg2', 'arrUtc', event.target.value)}
                   placeholder="STA"
-                  disabled={form.leg2.blh.trim().length > 0 || routeCityPairBlhByLeg.leg2.trim().length > 0}
+                  disabled={form.leg2.blh.trim().length > 0}
                 />
                 <span>OR</span>
                 <input
-                  value={form.leg2.blh}
+                  value={getRouteLegBlhDisplayValue('leg2')}
                   onChange={(event) => updateLeg('leg2', 'blh', event.target.value)}
-                  placeholder="BLH HH:MM"
-                  disabled={hasStationsAndTimes(form.leg2) || routeCityPairBlhByLeg.leg2.trim().length > 0}
+                  placeholder={routeCityPairLoadingByLeg.leg2 ? 'Loading...' : 'BLH HH:MM'}
+                  disabled={hasStationsAndTimes(form.leg2)}
                 />
                 <input
                   type="text"
@@ -3277,20 +3984,20 @@ function App() {
                   value={form.leg3.depUtc}
                   onChange={(event) => updateLeg('leg3', 'depUtc', event.target.value)}
                   placeholder="STD"
-                  disabled={form.leg3.blh.trim().length > 0 || routeCityPairBlhByLeg.leg3.trim().length > 0}
+                  disabled={form.leg3.blh.trim().length > 0}
                 />
                 <input
                   value={form.leg3.arrUtc}
                   onChange={(event) => updateLeg('leg3', 'arrUtc', event.target.value)}
                   placeholder="STA"
-                  disabled={form.leg3.blh.trim().length > 0 || routeCityPairBlhByLeg.leg3.trim().length > 0}
+                  disabled={form.leg3.blh.trim().length > 0}
                 />
                 <span>OR</span>
                 <input
-                  value={form.leg3.blh}
+                  value={getRouteLegBlhDisplayValue('leg3')}
                   onChange={(event) => updateLeg('leg3', 'blh', event.target.value)}
-                  placeholder="BLH HH:MM"
-                  disabled={hasStationsAndTimes(form.leg3) || routeCityPairBlhByLeg.leg3.trim().length > 0}
+                  placeholder={routeCityPairLoadingByLeg.leg3 ? 'Loading...' : 'BLH HH:MM'}
+                  disabled={hasStationsAndTimes(form.leg3)}
                 />
                 <input
                   type="text"
@@ -3338,20 +4045,20 @@ function App() {
                   value={form.leg4.depUtc}
                   onChange={(event) => updateLeg('leg4', 'depUtc', event.target.value)}
                   placeholder="STD"
-                  disabled={form.leg4.blh.trim().length > 0 || routeCityPairBlhByLeg.leg4.trim().length > 0}
+                  disabled={form.leg4.blh.trim().length > 0}
                 />
                 <input
                   value={form.leg4.arrUtc}
                   onChange={(event) => updateLeg('leg4', 'arrUtc', event.target.value)}
                   placeholder="STA"
-                  disabled={form.leg4.blh.trim().length > 0 || routeCityPairBlhByLeg.leg4.trim().length > 0}
+                  disabled={form.leg4.blh.trim().length > 0}
                 />
                 <span>OR</span>
                 <input
-                  value={form.leg4.blh}
+                  value={getRouteLegBlhDisplayValue('leg4')}
                   onChange={(event) => updateLeg('leg4', 'blh', event.target.value)}
-                  placeholder="BLH HH:MM"
-                  disabled={hasStationsAndTimes(form.leg4) || routeCityPairBlhByLeg.leg4.trim().length > 0}
+                  placeholder={routeCityPairLoadingByLeg.leg4 ? 'Loading...' : 'BLH HH:MM'}
+                  disabled={hasStationsAndTimes(form.leg4)}
                 />
                 <input
                   type="text"
@@ -3380,7 +4087,7 @@ function App() {
               {blhPreview.map((line) => (
                 <p key={`${line.label}-${line.from}-${line.to}`}>
                   {line.label} {line.from}-{line.to}:{' '}
-                  {line.source === 'city_pair_loading' ? 'Loading... (city_pair)' : `${line.blh.toFixed(2)} (${line.source})`}
+                  {line.source === 'city_pair_loading' ? 'Loading... (city_pair)' : `${formatBlhFromHours(line.blh)} (${line.source})`}
                 </p>
               ))}
             </div>
@@ -3692,7 +4399,7 @@ function App() {
                 checked={form.subCharter1IncludeHotac}
                 onChange={(event) => update('subCharter1IncludeHotac', event.target.checked)}
               />
-              HOTAC
+              HOTAC (Total in DKK)
             </label>
             <input
               type="number"
@@ -3707,7 +4414,7 @@ function App() {
                 checked={form.subCharter1IncludeCrewPerDiem}
                 onChange={(event) => update('subCharter1IncludeCrewPerDiem', event.target.checked)}
               />
-              Crew per diem
+              Crew per diem (Total in EUR)
             </label>
             <input
               type="number"
@@ -3844,7 +4551,7 @@ function App() {
                 checked={form.subCharter2IncludeHotac}
                 onChange={(event) => update('subCharter2IncludeHotac', event.target.checked)}
               />
-              HOTAC
+              HOTAC (Total in DKK)
             </label>
             <input
               type="number"
@@ -3859,7 +4566,7 @@ function App() {
                 checked={form.subCharter2IncludeCrewPerDiem}
                 onChange={(event) => update('subCharter2IncludeCrewPerDiem', event.target.checked)}
               />
-              Crew per diem
+              Crew per diem (Total in EUR)
             </label>
             <input
               type="number"
@@ -3996,7 +4703,7 @@ function App() {
                 checked={form.subCharter3IncludeHotac}
                 onChange={(event) => update('subCharter3IncludeHotac', event.target.checked)}
               />
-              HOTAC
+              HOTAC (Total in DKK)
             </label>
             <input
               type="number"
@@ -4011,7 +4718,7 @@ function App() {
                 checked={form.subCharter3IncludeCrewPerDiem}
                 onChange={(event) => update('subCharter3IncludeCrewPerDiem', event.target.checked)}
               />
-              Crew per diem
+              Crew per diem (Total in EUR)
             </label>
             <input
               type="number"
@@ -4083,7 +4790,7 @@ function App() {
                       try {
                         const blh = await fetchOcdcCityPairBlh(from, to)
                         if (blh) {
-                          updateAcmiLine(idx, { leg: { blh } })
+                          updateAcmiLine(idx, { leg: { blh }, manualBlhOverride: false })
                           setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
                         } else {
                           setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: true }))
@@ -4099,19 +4806,19 @@ function App() {
                   <span>OR</span>
                   <input
                     value={line.leg.depUtc}
-                    onChange={(event) => updateAcmiLine(idx, { leg: { depUtc: event.target.value, blh: '' } })}
+                    onChange={(event) => updateAcmiLine(idx, { leg: { depUtc: event.target.value } })}
                     placeholder="STD"
-                    disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                    disabled={!line.enabled || line.manualBlhOverride}
                   />
                   <input
                     value={line.leg.arrUtc}
-                    onChange={(event) => updateAcmiLine(idx, { leg: { arrUtc: event.target.value, blh: '' } })}
+                    onChange={(event) => updateAcmiLine(idx, { leg: { arrUtc: event.target.value } })}
                     placeholder="STA"
-                    disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                    disabled={!line.enabled || line.manualBlhOverride}
                   />
                   <span>OR</span>
                   <input
-                    value={cityPairLoadingByLine[`acmi-${idx}`] ? 'Loading...' : line.leg.blh}
+                    value={getModuleLegBlhDisplayValue(line, `acmi-${idx}`)}
                     onChange={(event) => updateAcmiLine(idx, { leg: { blh: event.target.value } })}
                     placeholder={
                       cityPairLoadingByLine[`acmi-${idx}`]
@@ -4122,10 +4829,25 @@ function App() {
                     }
                     disabled={!line.enabled || hasTimedBlh(line.leg)}
                   />
+                  <input
+                    type="date"
+                    value={line.departureDate}
+                    onChange={(event) => updateAcmiLine(idx, { departureDate: event.target.value })}
+                    placeholder="Date"
+                    disabled={!line.enabled}
+                  />
                   <button
                     type="button"
                     onClick={() => resetAcmiLine(idx)}
-                    disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}
+                    disabled={
+                      !line.enabled &&
+                      !line.manualBlh &&
+                      !line.departureDate &&
+                      !line.leg.from &&
+                      !line.leg.depUtc &&
+                      !line.leg.arrUtc &&
+                      !line.leg.to
+                    }
                   >
                     Reset
                   </button>
@@ -4135,12 +4857,12 @@ function App() {
             </div>
             <div className="grid compact">
               <label>
-                ACMI safety margin (%)
+                ACMI profit (%)
                 <input
                   type="number"
-                  min={0}
+                  min={20}
                   value={form.acmiSafetyMarginPercent}
-                  onChange={(event) => update('acmiSafetyMarginPercent', Number(event.target.value) || 0)}
+                  onChange={(event) => update('acmiSafetyMarginPercent', Math.max(20, Number(event.target.value) || 20))}
                 />
               </label>
             </div>
@@ -4148,17 +4870,30 @@ function App() {
               <div className="acmi-summary">
                 <p>Total ACMI BLH: {acmiBreakdown.totalBlh.toFixed(2)}</p>
                 <p>ACMI cost before margin: {toCurrency(acmiBreakdown.baseCostDkk)}</p>
-                <p>ACMI margin amount: {toCurrency(acmiBreakdown.marginDkk)}</p>
+                <p>ACMI profit amount: {toCurrency(acmiBreakdown.marginDkk)}</p>
+                <p>ACMI profit (%): {Math.max(20, form.acmiSafetyMarginPercent).toFixed(0)}%</p>
                 <p>Total ACMI cost: {toCurrency(acmiBreakdown.totalCostDkk)}</p>
                 <p>Minimum ACMI BLH (DKK): {toCurrency(acmiBreakdown.minimumBlhDkk)}</p>
                 <p>Minimum ACMI BLH (EUR): {toEur(acmiBreakdown.minimumBlhEur)}</p>
-                <div className="module-email-actions">
-                  <button type="button" onClick={composeAcmiInternalEmail}>
-                    Email price details
-                  </button>
-                  <button type="button" onClick={composeAcmiCustomerEmail}>
-                    Email Offer to Client
-                  </button>
+                <div className="module-email-layout">
+                  <div className="module-email-actions">
+                    <button type="button" onClick={() => requestEmailConfirm('acmi-internal', form.acmiEmailRecipients)}>
+                      Email price details
+                      <span className="internal-only-note">(INTERNAL ONLY)</span>
+                    </button>
+                    <button type="button" onClick={() => requestEmailConfirm('acmi-client', form.acmiEmailRecipients)}>
+                      Email Offer to Client
+                    </button>
+                  </div>
+                  <label className="module-email-recipients">
+                    Email recipients (comma separated)
+                    <input
+                      type="text"
+                      value={form.acmiEmailRecipients}
+                      onChange={(event) => update('acmiEmailRecipients', event.target.value)}
+                      placeholder="ops@sunclass.dk, crew@sunclass.dk"
+                    />
+                  </label>
                 </div>
                 <details className="acmi-breakdown-details">
                   <summary>Show ACMI calculation setup</summary>
@@ -4200,7 +4935,7 @@ function App() {
                   Adhoc includes <strong>all expenses</strong> in its operating part (full DOC), then adds crew costs and own SCA add-ons.
                 </li>
                 <li>
-                  <strong>Adhoc safety margin (%)</strong> is applied on top of the base total to produce minimum total and minimum BLH prices.
+                  <strong>Adhoc profit (%)</strong> is applied on top of the base total to produce minimum total and minimum BLH prices.
                 </li>
                 <li>
                   If no active line has valid BLH input yet, no Adhoc price is calculated.
@@ -4263,7 +4998,7 @@ function App() {
                       try {
                         const blh = await fetchOcdcCityPairBlh(from, to)
                         if (blh) {
-                          updateAdhocLine(idx, { leg: { blh } })
+                          updateAdhocLine(idx, { leg: { blh }, manualBlhOverride: false })
                           setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: false }))
                         } else {
                           setCityPairFailedByLine((prev) => ({ ...prev, [loadingKey]: true }))
@@ -4279,19 +5014,24 @@ function App() {
                   <span>OR</span>
                   <input
                     value={line.leg.depUtc}
-                    onChange={(event) => updateAdhocLine(idx, { leg: { depUtc: event.target.value, blh: '' } })}
+                    onChange={(event) => {
+                      const depUtc = normalizeUtcInput(event.target.value)
+                      const autoArrUtc =
+                        line.leg.arrUtc.trim().length === 0 ? deriveArrivalUtcFromDepartureAndBlh(depUtc, line.leg.blh) : null
+                      updateAdhocLine(idx, { leg: { depUtc, ...(autoArrUtc ? { arrUtc: autoArrUtc } : {}) } })
+                    }}
                     placeholder="STD"
-                    disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                    disabled={!line.enabled || line.manualBlhOverride}
                   />
                   <input
                     value={line.leg.arrUtc}
-                    onChange={(event) => updateAdhocLine(idx, { leg: { arrUtc: event.target.value, blh: '' } })}
+                    onChange={(event) => updateAdhocLine(idx, { leg: { arrUtc: event.target.value } })}
                     placeholder="STA"
-                    disabled={!line.enabled || hasStations(line.leg) || line.manualBlhOverride}
+                    disabled={!line.enabled || line.manualBlhOverride}
                   />
                   <span>OR</span>
                   <input
-                    value={cityPairLoadingByLine[`adhoc-${idx}`] ? 'Loading...' : line.leg.blh}
+                    value={getModuleLegBlhDisplayValue(line, `adhoc-${idx}`)}
                     onChange={(event) => updateAdhocLine(idx, { leg: { blh: event.target.value } })}
                     placeholder={
                       cityPairLoadingByLine[`adhoc-${idx}`]
@@ -4302,10 +5042,25 @@ function App() {
                     }
                     disabled={!line.enabled || hasTimedBlh(line.leg)}
                   />
+                  <input
+                    type="date"
+                    value={line.departureDate}
+                    onChange={(event) => updateAdhocLine(idx, { departureDate: event.target.value })}
+                    placeholder="Date"
+                    disabled={!line.enabled}
+                  />
                   <button
                     type="button"
                     onClick={() => resetAdhocLine(idx)}
-                    disabled={!line.enabled && !line.manualBlh && !line.leg.from && !line.leg.depUtc && !line.leg.arrUtc && !line.leg.to}
+                    disabled={
+                      !line.enabled &&
+                      !line.manualBlh &&
+                      !line.departureDate &&
+                      !line.leg.from &&
+                      !line.leg.depUtc &&
+                      !line.leg.arrUtc &&
+                      !line.leg.to
+                    }
                   >
                     Reset
                   </button>
@@ -4315,7 +5070,7 @@ function App() {
             </div>
             <div className="grid compact">
               <label>
-                Adhoc safety margin (%)
+                Adhoc profit (%)
                 <input
                   type="number"
                   min={0}
@@ -4323,23 +5078,86 @@ function App() {
                   onChange={(event) => update('adhocSafetyMarginPercent', Number(event.target.value) || 0)}
                 />
               </label>
+              <label className="mini-check">
+                <input
+                  type="checkbox"
+                  checked={form.adhocUseFuelCorrection}
+                  onChange={(event) => update('adhocUseFuelCorrection', event.target.checked)}
+                />
+                Use fuel correction factor
+              </label>
+              <label>
+                Fuel price reference (USD/MT)
+                <input
+                  type="number"
+                  min={0}
+                  value={form.adhocFuelPriceBasicRef}
+                  onChange={(event) => update('adhocFuelPriceBasicRef', Number(event.target.value) || 0)}
+                />
+                <span className="top-rate-meta">Baseline: (MAR26 1072.08 PLATTS GLOBAL)</span>
+              </label>
+              <label>
+                Fuel price current (USD/MT)
+                <input
+                  type="number"
+                  min={0}
+                  value={form.adhocFuelPriceCurrent}
+                  onChange={(event) => update('adhocFuelPriceCurrent', Number(event.target.value) || 0)}
+                />
+                {adhocFuelFetchMeta ? <span className="top-rate-meta">Source: ({adhocFuelFetchMeta})</span> : null}
+              </label>
             </div>
             {adhocBreakdown ? (
               <div className="acmi-summary">
+                <p>
+                  Fuel correction factor = current/reference:{' '}
+                  {form.adhocFuelPriceCurrent.toFixed(2)} / {form.adhocFuelPriceBasicRef.toFixed(2)} ={' '}
+                  {(form.adhocUseFuelCorrection
+                    ? getFuelCorrectionFactor(form.adhocFuelPriceCurrent, form.adhocFuelPriceBasicRef)
+                    : 1
+                  ).toFixed(3)}
+                </p>
+                <p>
+                  {form.adhocUseFuelCorrection
+                    ? 'Factor 1.000 means no fuel adjustment versus reference.'
+                    : 'Fuel correction is disabled (factor fixed at 1.000).'}
+                </p>
                 <p>Total Adhoc BLH: {adhocBreakdown.totalBlh.toFixed(2)}</p>
-                <p>Adhoc cost before margin (all expenses): {toCurrency(adhocBreakdown.totalCostDkk)}</p>
-                <p>Adhoc margin amount: {toCurrency(adhocBreakdown.marginDkk)}</p>
-                <p>Minimum Adhoc total price (DKK): {toCurrency(adhocBreakdown.minimumTotalDkk)}</p>
-                <p>Minimum Adhoc total price (EUR): {toEur(adhocBreakdown.minimumTotalEur)}</p>
-                <p>Minimum Adhoc BLH (DKK): {toCurrency(adhocBreakdown.minimumBlhDkk)}</p>
-                <p>Minimum Adhoc BLH (EUR): {toEur(adhocBreakdown.minimumBlhEur)}</p>
-                <div className="module-email-actions">
-                  <button type="button" onClick={composeAdhocInternalEmail}>
-                    Email price details
-                  </button>
-                  <button type="button" onClick={composeAdhocCustomerEmail}>
-                    Email Offer to Client
-                  </button>
+                <p>Adhoc cost before profit (all expenses): {toCurrency(adhocBreakdown.totalCostDkk)}</p>
+                <p>Adhoc profit amount: {toCurrency(adhocBreakdown.marginDkk)}</p>
+                <p>
+                  Minimum Adhoc total price (DKK): {toCurrency(adhocBreakdown.minimumTotalDkk)} (rounded to nearest 100 in email offer)
+                </p>
+                <p>
+                  Minimum Adhoc total price (EUR): {toEur(adhocBreakdown.minimumTotalEur)} (rounded to nearest 100 in email offer)
+                </p>
+                <div className="module-email-layout">
+                  <div className="module-email-actions">
+                    <button type="button" onClick={() => requestEmailConfirm('adhoc-internal', form.adhocEmailRecipients)}>
+                      Email price details
+                      <span className="internal-only-note">(INTERNAL ONLY)</span>
+                    </button>
+                    <button type="button" onClick={() => requestEmailConfirm('adhoc-client', form.adhocEmailRecipients)}>
+                      Email Offer to Client
+                    </button>
+                    <label className="mini-check">
+                      <input
+                        type="checkbox"
+                        checked={form.adhocOfferSendInDanish}
+                        onChange={(event) => update('adhocOfferSendInDanish', event.target.checked)}
+                      />
+                      Send Email Offer in Danish and in DKK
+                    </label>
+                  </div>
+                  <label className="module-email-recipients">
+                    Email recipients (comma separated)
+                    <input
+                      type="text"
+                      value={form.adhocEmailRecipients}
+                      onChange={(event) => update('adhocEmailRecipients', event.target.value)}
+                      placeholder="ops@sunclass.dk, crew@sunclass.dk"
+                    />
+                  </label>
                 </div>
                 <details className="acmi-breakdown-details">
                   <summary>Show Adhoc calculation setup</summary>
@@ -4472,46 +5290,99 @@ function App() {
                   />
                 </label>
               </div>
-              <div className="sub-addons-row">
+              <div
+                className={`sub-addons-row ${form.enableAcmiModule || form.enableAdhocModule ? 'sub-addons-row-tool' : 'sub-addons-row-main'}`}
+              >
                 <label className="mini-check">
                   <input
                     type="checkbox"
                     checked={form.ownIncludeScaExtraHotac}
                     onChange={(event) => update('ownIncludeScaExtraHotac', event.target.checked)}
                   />
-                  HOTAC (DKK)
+                  {form.enableAcmiModule || form.enableAdhocModule
+                    ? 'HOTAC (DKK): Choose total nights'
+                    : 'HOTAC (DKK)'}
                 </label>
                 <input
                   type="number"
                   min={0}
-                  value={form.ownScaExtraHotacDkk}
-                  onFocus={(event) => event.target.select()}
-                  onChange={(event) =>
-                    update('ownScaExtraHotacDkk', event.target.value === '' ? '' : Number(event.target.value) || 0)
+                  value={
+                    form.enableAcmiModule
+                      ? form.acmiHotacNights
+                      : form.enableAdhocModule
+                        ? form.adhocHotacNights
+                        : form.ownScaExtraHotacDkk
                   }
-                  placeholder="HOTAC DKK"
+                  onFocus={(event) => event.target.select()}
+                  onChange={(event) => {
+                    const nextValue = event.target.value === '' ? 0 : Number(event.target.value) || 0
+                    if (form.enableAcmiModule) {
+                      update('acmiHotacNights', nextValue)
+                      return
+                    }
+                    if (form.enableAdhocModule) {
+                      update('adhocHotacNights', nextValue)
+                      return
+                    }
+                    update('ownScaExtraHotacDkk', event.target.value === '' ? '' : nextValue)
+                  }}
+                  placeholder={form.enableAcmiModule || form.enableAdhocModule ? 'Choose total nights' : 'HOTAC DKK'}
                 />
+                {form.enableAcmiModule || form.enableAdhocModule ? (
+                  <span className="addon-rate-note">
+                    Auto rate:{' '}
+                    {(
+                      (form.enableAcmiModule ? form.acmiAircraft : form.adhocAircraft) || selectedOriginalType
+                    ) === 'A339'
+                      ? '10*1000 DKK/night'
+                      : '7*1000 DKK/night'}
+                  </span>
+                ) : null}
                 <label className="mini-check">
                   <input
                     type="checkbox"
                     checked={form.ownIncludeScaExtraCrewPerDiem}
                     onChange={(event) => update('ownIncludeScaExtraCrewPerDiem', event.target.checked)}
                   />
-                  Crew per diem (EUR)
+                  {form.enableAcmiModule || form.enableAdhocModule
+                    ? 'Crew per Diem (EUR): Choose total operating days'
+                    : 'Crew per diem (EUR)'}
                 </label>
                 <input
                   type="number"
                   min={0}
-                  value={form.ownScaExtraCrewPerDiemEur}
-                  onFocus={(event) => event.target.select()}
-                  onChange={(event) =>
-                    update(
-                      'ownScaExtraCrewPerDiemEur',
-                      event.target.value === '' ? '' : Number(event.target.value) || 0,
-                    )
+                  value={
+                    form.enableAcmiModule
+                      ? form.acmiCrewPerDiemOperatingDays
+                      : form.enableAdhocModule
+                        ? form.adhocCrewPerDiemOperatingDays
+                        : form.ownScaExtraCrewPerDiemEur
                   }
-                  placeholder="Crew per diem EUR"
+                  onFocus={(event) => event.target.select()}
+                  onChange={(event) => {
+                    const nextValue = event.target.value === '' ? 0 : Number(event.target.value) || 0
+                    if (form.enableAcmiModule) {
+                      update('acmiCrewPerDiemOperatingDays', nextValue)
+                      return
+                    }
+                    if (form.enableAdhocModule) {
+                      update('adhocCrewPerDiemOperatingDays', nextValue)
+                      return
+                    }
+                    update('ownScaExtraCrewPerDiemEur', event.target.value === '' ? '' : nextValue)
+                  }}
+                  placeholder={form.enableAcmiModule || form.enableAdhocModule ? 'Operating days' : 'Crew per diem EUR'}
                 />
+                {form.enableAcmiModule || form.enableAdhocModule ? (
+                  <span className="addon-rate-note">
+                    Auto rate:{' '}
+                    {(
+                      (form.enableAcmiModule ? form.acmiAircraft : form.adhocAircraft) || selectedOriginalType
+                    ) === 'A339'
+                      ? '10*120 EUR/day'
+                      : '7*120 EUR/day'}
+                  </span>
+                ) : null}
               </div>
             </div>
 
@@ -4799,13 +5670,16 @@ function App() {
             </div>
           )}
           <details className="audit-history-details">
-            <summary>Historik - tidligere scenarier ({scenarioHistory.length})</summary>
-            {scenarioHistory.length === 0 ? (
+            <summary>Historik - tidligere scenarier ({visibleScenarioHistory.length})</summary>
+            <p className="eu261-note">
+              Historik vises kun for aktiv visning (Main, ACMI eller Adhoc). Main, ACMI og Adhoc gemmes efter kort input-pause.
+            </p>
+            {visibleScenarioHistory.length === 0 ? (
               <p className="result-placeholder">Ingen historik endnu. Beregn et scenarie for at gemme et historikpunkt.</p>
             ) : (
               <>
                 <div className="audit-history-list">
-                  {scenarioHistory.map((entry) => (
+                  {visibleScenarioHistory.map((entry) => (
                     <div key={entry.id} className="audit-history-item">
                       <p>
                         <strong>{entry.title}</strong> ({entry.mode.toUpperCase()}) - {entry.createdAt}
@@ -4818,7 +5692,12 @@ function App() {
                     </div>
                   ))}
                 </div>
-                <button type="button" onClick={() => setScenarioHistory([])}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setScenarioHistory((prev) => prev.filter((entry) => entry.mode !== activeHistoryMode))
+                  }
+                >
                   Clear historik
                 </button>
               </>
